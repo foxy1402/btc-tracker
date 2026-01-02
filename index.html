@@ -115,7 +115,7 @@
             text-align: center;
             line-height: 1.4;
             transform: translateY(-50%);
-            transition: top 0.3s ease-out;
+            transition: top 0.3s ease-out, background-color 0.3s ease;
         }
 
         .price-value {
@@ -134,6 +134,21 @@
             font-size: 12px;
             color: #666;
             margin-top: 16px;
+        }
+
+        .live-indicator {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            background-color: #00c896;
+            border-radius: 50%;
+            margin-right: 6px;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
         }
 
         .loading {
@@ -342,7 +357,7 @@
                 </div>
 
                 <div class="status">
-                    <p>Last updated: <span id="timestamp">-</span> • Auto-refresh: 30s</p>
+                    <p><span class="live-indicator"></span>Live • Last updated: <span id="timestamp">-</span></p>
                 </div>
             </div>
         </div>
@@ -351,18 +366,19 @@
     <script>
         let chart = null;
         let isFullscreen = false;
-        let updateInterval = null;
-        let lastUpdateTime = 0;
+        let chartUpdateInterval = null;
         let hideButtonTimer = null;
+        let websocket = null;
+        let currentPrice = 0;
+        let priceChange24h = 0;
+        
         const BINANCE_API = 'https://api.binance.com/api/v3';
-        const UPDATE_INTERVAL = 30000; // 30 seconds
-        const MIN_UPDATE_GAP = 5000; // Minimum 5s between updates
-        const BUTTON_HIDE_DELAY = 3000; // Hide button after 3 seconds
+        const BINANCE_WS = 'wss://stream.binance.com:9443/ws/btcusdt@ticker';
+        const CHART_UPDATE_INTERVAL = 60000; // Update chart every 60 seconds
+        const BUTTON_HIDE_DELAY = 3000;
+        const MAX_DATA_POINTS = 120;
 
-        // Memory management: Limit data points
-        const MAX_DATA_POINTS = 100;
-
-        // Format currency with exact decimals
+        // Format currency
         function formatCurrency(value) {
             return new Intl.NumberFormat('en-US', {
                 minimumFractionDigits: 0,
@@ -370,103 +386,79 @@
             }).format(value);
         }
 
-        // Throttle updates to prevent excessive API calls
-        function throttleUpdate() {
-            const now = Date.now();
-            if (now - lastUpdateTime < MIN_UPDATE_GAP) {
-                return false;
-            }
-            lastUpdateTime = now;
-            return true;
-        }
-
         // Update price label position
-        function updatePriceLabelPosition(currentPrice) {
+        function updatePriceLabelPosition(price) {
             if (!chart || !chart.scales || !chart.scales.y) return;
             
             const priceLabel = document.getElementById('priceLabel');
             const chartWrapper = document.getElementById('chartWrapper');
             
-            // Get the Y position from the chart
-            const yPos = chart.scales.y.getPixelForValue(currentPrice);
-            
-            // Account for chart wrapper padding
+            const yPos = chart.scales.y.getPixelForValue(price);
             const wrapperRect = chartWrapper.getBoundingClientRect();
             const canvasRect = chart.canvas.getBoundingClientRect();
-            
-            // Calculate offset from wrapper top
             const offsetFromTop = canvasRect.top - wrapperRect.top;
             
-            // Set position (translateY(-50%) centers the label on the line)
             priceLabel.style.top = (offsetFromTop + yPos) + 'px';
         }
 
-        // Auto-hide exit button
-        function startHideButtonTimer() {
-            if (hideButtonTimer) clearTimeout(hideButtonTimer);
+        // Update price display
+        function updatePriceDisplay(price, change24h) {
+            currentPrice = price;
+            priceChange24h = change24h;
             
-            const exitBtn = document.getElementById('exitBtn');
-            const tapHint = document.getElementById('tapHint');
+            const isPositive = change24h >= 0;
+            const chartColor = isPositive ? '#00c896' : '#ff4444';
             
-            if (exitBtn) {
-                exitBtn.classList.remove('hidden');
-                if (tapHint) tapHint.classList.remove('show');
+            document.getElementById('priceValue').textContent = '$' + formatCurrency(price);
+            document.getElementById('priceChange').textContent = (isPositive ? '+' : '') + change24h.toFixed(2) + '%';
+            
+            const priceLabel = document.getElementById('priceLabel');
+            priceLabel.style.backgroundColor = chartColor;
+            
+            updatePriceLabelPosition(price);
+            
+            const now = new Date();
+            document.getElementById('timestamp').textContent = now.toLocaleTimeString();
+        }
+
+        // Connect to Binance WebSocket for real-time price updates
+        function connectWebSocket() {
+            websocket = new WebSocket(BINANCE_WS);
+            
+            websocket.onopen = function() {
+                console.log('WebSocket connected');
+            };
+            
+            websocket.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                const price = parseFloat(data.c); // Current price
+                const change24h = parseFloat(data.P); // 24h price change percentage
                 
-                hideButtonTimer = setTimeout(() => {
-                    exitBtn.classList.add('hidden');
-                    if (tapHint) tapHint.classList.add('show');
-                    
-                    // Hide hint after 2 seconds
-                    setTimeout(() => {
-                        if (tapHint) tapHint.classList.remove('show');
-                    }, 2000);
-                }, BUTTON_HIDE_DELAY);
-            }
+                updatePriceDisplay(price, change24h);
+            };
+            
+            websocket.onerror = function(error) {
+                console.error('WebSocket error:', error);
+            };
+            
+            websocket.onclose = function() {
+                console.log('WebSocket closed, reconnecting in 5s...');
+                setTimeout(connectWebSocket, 5000);
+            };
         }
 
-        // Show exit button on tap
-        function showExitButton() {
-            if (isFullscreen) {
-                startHideButtonTimer();
-            }
-        }
-
-        // Fetch Bitcoin data from Binance
-        async function fetchBitcoinData() {
-            if (!throttleUpdate()) return;
-
+        // Fetch historical chart data
+        async function fetchChartData() {
             try {
-                document.getElementById('error').style.display = 'none';
-
-                // Fetch 24hr ticker data (price + change)
-                const tickerResponse = await fetch(`${BINANCE_API}/ticker/24hr?symbol=BTCUSDT`);
+                const response = await fetch(`${BINANCE_API}/klines?symbol=BTCUSDT&interval=1m&limit=1440`);
                 
-                if (!tickerResponse.ok) {
-                    throw new Error(`HTTP ${tickerResponse.status}: Failed to fetch ticker data`);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: Failed to fetch chart data`);
                 }
 
-                const tickerData = await tickerResponse.json();
+                const klinesData = await response.json();
+                updateChart(klinesData);
                 
-                // Fetch reduced kline data (only 5-minute intervals for 24h = 288 points, then sample to 100)
-                const klinesResponse = await fetch(`${BINANCE_API}/klines?symbol=BTCUSDT&interval=5m&limit=288`);
-                
-                if (!klinesResponse.ok) {
-                    throw new Error(`HTTP ${klinesResponse.status}: Failed to fetch chart data`);
-                }
-
-                const klinesData = await klinesResponse.json();
-
-                // Get 24h change percentage
-                const priceChange24h = parseFloat(tickerData.priceChangePercent);
-
-                // Update timestamp
-                const now = new Date();
-                document.getElementById('timestamp').textContent = now.toLocaleTimeString();
-
-                // Update chart with klines data and change percentage
-                updateChart(klinesData, priceChange24h);
-
-                // Show content, hide loading
                 document.getElementById('loading').style.display = 'none';
                 document.getElementById('content').style.display = 'block';
 
@@ -479,46 +471,29 @@
         }
 
         // Update chart with klines data
-        function updateChart(klinesData, priceChange24h) {
+        function updateChart(klinesData) {
             const ctx = document.getElementById('priceChart').getContext('2d');
             
-            // Sample data to MAX_DATA_POINTS for performance
             const sampleRate = Math.ceil(klinesData.length / MAX_DATA_POINTS);
             const sampledData = klinesData.filter((_, index) => index % sampleRate === 0);
             
-            // Format data: kline format is [time, open, high, low, close, volume, ...]
             const labels = sampledData.map(kline => {
                 const date = new Date(kline[0]);
                 return date.getHours() + ':' + String(date.getMinutes()).padStart(2, '0');
             });
 
-            const prices = sampledData.map(kline => parseFloat(kline[4])); // Close price
-            const currentPrice = prices[prices.length - 1];
-
-            // Determine color based on 24h change
+            const prices = sampledData.map(kline => parseFloat(kline[4]));
+            
             const isPositive = priceChange24h >= 0;
             const chartColor = isPositive ? '#00c896' : '#ff4444';
             const bgColor = isPositive ? 'rgba(0, 200, 150, 0.1)' : 'rgba(255, 68, 68, 0.1)';
 
-            // Update price label
-            document.getElementById('priceValue').textContent = '$' + formatCurrency(currentPrice);
-            document.getElementById('priceChange').textContent = (isPositive ? '+' : '') + priceChange24h.toFixed(2) + '%';
-            
-            // Update label color
-            const priceLabel = document.getElementById('priceLabel');
-            priceLabel.style.backgroundColor = chartColor;
-
             if (chart) {
-                // Update existing chart (more efficient than recreating)
                 chart.data.labels = labels;
                 chart.data.datasets[0].data = prices;
                 chart.data.datasets[0].borderColor = chartColor;
                 chart.data.datasets[0].backgroundColor = bgColor;
-                chart.data.datasets[0].pointHoverBackgroundColor = chartColor;
-                chart.update('none'); // 'none' mode disables animations for better performance
-                
-                // Update label position after chart is updated
-                setTimeout(() => updatePriceLabelPosition(currentPrice), 50);
+                chart.update('none');
             } else {
                 chart = new Chart(ctx, {
                     type: 'line',
@@ -542,7 +517,7 @@
                     options: {
                         responsive: true,
                         maintainAspectRatio: false,
-                        animation: false, // Disable animations for better performance
+                        animation: false,
                         interaction: {
                             intersect: false,
                             mode: 'index',
@@ -588,9 +563,34 @@
                         }
                     }
                 });
+            }
+        }
 
-                // Position label after initial render
-                setTimeout(() => updatePriceLabelPosition(currentPrice), 100);
+        // Auto-hide exit button
+        function startHideButtonTimer() {
+            if (hideButtonTimer) clearTimeout(hideButtonTimer);
+            
+            const exitBtn = document.getElementById('exitBtn');
+            const tapHint = document.getElementById('tapHint');
+            
+            if (exitBtn) {
+                exitBtn.classList.remove('hidden');
+                if (tapHint) tapHint.classList.remove('show');
+                
+                hideButtonTimer = setTimeout(() => {
+                    exitBtn.classList.add('hidden');
+                    if (tapHint) tapHint.classList.add('show');
+                    
+                    setTimeout(() => {
+                        if (tapHint) tapHint.classList.remove('show');
+                    }, 2000);
+                }, BUTTON_HIDE_DELAY);
+            }
+        }
+
+        function showExitButton() {
+            if (isFullscreen) {
+                startHideButtonTimer();
             }
         }
 
@@ -599,15 +599,11 @@
             const container = document.getElementById('mainContainer');
             
             if (!isFullscreen) {
-                // Enter fullscreen
                 container.classList.add('fullscreen-mode');
-                
-                // Hide header and controls
                 document.querySelector('.header').style.display = 'none';
                 document.querySelector('.controls').style.display = 'none';
                 document.querySelector('.status').style.display = 'none';
                 
-                // Add exit button
                 const exitBtn = document.createElement('button');
                 exitBtn.className = 'exit-fullscreen';
                 exitBtn.textContent = '✕ Exit';
@@ -615,123 +611,99 @@
                 exitBtn.id = 'exitBtn';
                 document.body.appendChild(exitBtn);
                 
-                // Add tap hint
                 const tapHint = document.createElement('div');
                 tapHint.className = 'tap-hint';
                 tapHint.textContent = 'Tap screen to show exit button';
                 tapHint.id = 'tapHint';
                 document.body.appendChild(tapHint);
                 
-                // Add tap listener to show button
                 document.addEventListener('click', showExitButton);
                 document.addEventListener('touchstart', showExitButton);
                 
                 isFullscreen = true;
-                
-                // Start auto-hide timer
                 startHideButtonTimer();
                 
-                // Resize chart and reposition label
                 if (chart) {
                     setTimeout(() => {
                         chart.resize();
-                        const lastPrice = chart.data.datasets[0].data[chart.data.datasets[0].data.length - 1];
-                        updatePriceLabelPosition(lastPrice);
+                        updatePriceLabelPosition(currentPrice);
                     }, 100);
                 }
             } else {
-                // Exit fullscreen
                 container.classList.remove('fullscreen-mode');
-                
-                // Show header and controls
                 document.querySelector('.header').style.display = 'block';
                 document.querySelector('.controls').style.display = 'flex';
                 document.querySelector('.status').style.display = 'block';
                 
-                // Remove exit button and hint
                 const exitBtn = document.getElementById('exitBtn');
                 const tapHint = document.getElementById('tapHint');
                 if (exitBtn) exitBtn.remove();
                 if (tapHint) tapHint.remove();
                 
-                // Remove tap listeners
                 document.removeEventListener('click', showExitButton);
                 document.removeEventListener('touchstart', showExitButton);
                 
-                // Clear timer
                 if (hideButtonTimer) clearTimeout(hideButtonTimer);
                 
                 isFullscreen = false;
                 
-                // Resize chart and reposition label
                 if (chart) {
                     setTimeout(() => {
                         chart.resize();
-                        const lastPrice = chart.data.datasets[0].data[chart.data.datasets[0].data.length - 1];
-                        updatePriceLabelPosition(lastPrice);
+                        updatePriceLabelPosition(currentPrice);
                     }, 100);
                 }
             }
         }
 
-        // Page Visibility API: Pause updates when tab is hidden
+        // Page visibility handling
         document.addEventListener('visibilitychange', function() {
             if (document.hidden) {
-                // Clear interval when page is hidden
-                if (updateInterval) {
-                    clearInterval(updateInterval);
-                    updateInterval = null;
+                if (websocket) websocket.close();
+                if (chartUpdateInterval) {
+                    clearInterval(chartUpdateInterval);
+                    chartUpdateInterval = null;
                 }
             } else {
-                // Resume updates when page becomes visible
-                if (!updateInterval) {
-                    fetchBitcoinData(); // Immediate update
-                    updateInterval = setInterval(fetchBitcoinData, UPDATE_INTERVAL);
+                connectWebSocket();
+                fetchChartData();
+                if (!chartUpdateInterval) {
+                    chartUpdateInterval = setInterval(fetchChartData, CHART_UPDATE_INTERVAL);
                 }
             }
         });
 
-        // Handle orientation change
+        // Orientation and resize handling
         window.addEventListener('orientationchange', function() {
             if (chart) {
                 setTimeout(() => {
                     chart.resize();
-                    const lastPrice = chart.data.datasets[0].data[chart.data.datasets[0].data.length - 1];
-                    updatePriceLabelPosition(lastPrice);
+                    updatePriceLabelPosition(currentPrice);
                 }, 200);
             }
         });
 
-        // Handle window resize
         window.addEventListener('resize', function() {
             if (chart) {
                 setTimeout(() => {
                     chart.resize();
-                    const lastPrice = chart.data.datasets[0].data[chart.data.datasets[0].data.length - 1];
-                    updatePriceLabelPosition(lastPrice);
+                    updatePriceLabelPosition(currentPrice);
                 }, 100);
             }
         });
 
-        // Cleanup on page unload
+        // Cleanup
         window.addEventListener('beforeunload', function() {
-            if (chart) {
-                chart.destroy();
-                chart = null;
-            }
-            if (updateInterval) {
-                clearInterval(updateInterval);
-            }
-            if (hideButtonTimer) {
-                clearTimeout(hideButtonTimer);
-            }
+            if (websocket) websocket.close();
+            if (chart) chart.destroy();
+            if (chartUpdateInterval) clearInterval(chartUpdateInterval);
+            if (hideButtonTimer) clearTimeout(hideButtonTimer);
         });
 
-        // Initial fetch
-        fetchBitcoinData();
-
-        // Auto-refresh every 30 seconds
-        updateInterval = setInterval(fetchBitcoinData, UPDATE_INTERVAL);
+        // Initialize
+        connectWebSocket();
+        fetchChartData();
+        chartUpdateInterval = setInterval(fetchChartData, CHART_UPDATE_INTERVAL);
     </script>
 </body>
 </html>
