@@ -1,0 +1,737 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Bitcoin Price Tracker</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --color-bg: #1a1a1a;
+            --color-surface: #2d2d2d;
+            --color-text: #e0e0e0;
+            --color-primary: #f7931a;
+            --color-success: #00c896;
+            --color-danger: #ff4444;
+            --color-border: #404040;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background-color: var(--color-bg);
+            color: var(--color-text);
+            padding: 20px;
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+
+        .header h1 {
+            font-size: 24px;
+            font-weight: 600;
+            margin-bottom: 8px;
+            color: var(--color-primary);
+        }
+
+        .header p {
+            font-size: 12px;
+            color: #888;
+        }
+
+        .controls {
+            display: flex;
+            justify-content: center;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+
+        .btn {
+            padding: 10px 24px;
+            background-color: var(--color-primary);
+            color: #000;
+            border: none;
+            border-radius: 6px;
+            font-weight: 600;
+            font-size: 14px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        .btn:active {
+            background-color: #e6821a;
+        }
+
+        .card {
+            background-color: var(--color-surface);
+            border: 1px solid var(--color-border);
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        }
+
+        .chart-wrapper {
+            position: relative;
+            height: 400px;
+            background-color: rgba(0, 0, 0, 0.3);
+            border-radius: 8px;
+            padding: 16px;
+            padding-right: 120px;
+            touch-action: pan-y;
+        }
+
+        .chart-canvas {
+            height: 100%;
+        }
+
+        .price-label {
+            position: absolute;
+            right: 16px;
+            background-color: var(--color-success);
+            color: #000;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-family: 'Courier New', monospace;
+            font-weight: 700;
+            pointer-events: none;
+            z-index: 10;
+            text-align: center;
+            line-height: 1.4;
+            transform: translateY(-50%);
+            transition: top 0.3s ease-out;
+        }
+
+        .price-value {
+            font-size: 15px;
+            display: block;
+        }
+
+        .price-change {
+            font-size: 12px;
+            display: block;
+            margin-top: 2px;
+        }
+
+        .status {
+            text-align: center;
+            font-size: 12px;
+            color: #666;
+            margin-top: 16px;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 60px 20px;
+            color: #888;
+            font-size: 14px;
+        }
+
+        .error {
+            background-color: rgba(255, 68, 68, 0.1);
+            border: 1px solid var(--color-danger);
+            color: var(--color-danger);
+            padding: 16px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            text-align: center;
+            font-size: 14px;
+        }
+
+        /* Fullscreen mode */
+        .fullscreen-mode {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background-color: var(--color-bg);
+            z-index: 1000;
+            padding: 12px;
+        }
+
+        .fullscreen-mode .chart-wrapper {
+            height: calc(100vh - 24px);
+            padding-right: 130px;
+            padding-bottom: 16px;
+        }
+
+        .fullscreen-mode .price-label {
+            right: 20px;
+            padding: 10px 14px;
+        }
+
+        .fullscreen-mode .price-value {
+            font-size: 18px;
+        }
+
+        .fullscreen-mode .price-change {
+            font-size: 14px;
+        }
+
+        .exit-fullscreen {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            padding: 8px 16px;
+            background-color: rgba(247, 147, 26, 0.95);
+            color: #000;
+            border: none;
+            border-radius: 6px;
+            font-weight: 600;
+            font-size: 13px;
+            cursor: pointer;
+            z-index: 1001;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+            opacity: 1;
+            transition: opacity 0.3s ease;
+        }
+
+        .exit-fullscreen.hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .tap-hint {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background-color: rgba(0, 0, 0, 0.7);
+            color: #888;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 11px;
+            z-index: 1002;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+            pointer-events: none;
+        }
+
+        .tap-hint.show {
+            opacity: 1;
+        }
+
+        /* Landscape optimization */
+        @media (orientation: landscape) {
+            body {
+                padding: 12px;
+            }
+
+            .header {
+                margin-bottom: 12px;
+            }
+
+            .header h1 {
+                font-size: 20px;
+            }
+
+            .header p {
+                font-size: 11px;
+            }
+
+            .chart-wrapper {
+                height: calc(100vh - 200px);
+            }
+
+            .fullscreen-mode .chart-wrapper {
+                height: calc(100vh - 24px);
+            }
+
+            .exit-fullscreen {
+                top: 8px;
+                right: 8px;
+                padding: 6px 12px;
+                font-size: 12px;
+            }
+        }
+
+        /* Mobile optimization */
+        @media (max-width: 768px) {
+            body {
+                padding: 12px;
+            }
+
+            .header h1 {
+                font-size: 20px;
+            }
+
+            .header p {
+                font-size: 11px;
+            }
+
+            .card {
+                padding: 16px;
+            }
+
+            .chart-wrapper {
+                height: 350px;
+                padding-right: 100px;
+            }
+
+            .price-label {
+                padding: 6px 10px;
+                right: 12px;
+            }
+
+            .price-value {
+                font-size: 13px;
+            }
+
+            .price-change {
+                font-size: 11px;
+            }
+        }
+
+        /* Small screens optimization */
+        @media (max-width: 360px) {
+            .chart-wrapper {
+                padding-right: 90px;
+                height: 320px;
+            }
+
+            .price-value {
+                font-size: 12px;
+            }
+
+            .price-change {
+                font-size: 10px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container" id="mainContainer">
+        <div class="header">
+            <h1>₿ BTCUSDT</h1>
+            <p>Real-time Binance price tracking</p>
+        </div>
+
+        <div class="controls">
+            <button class="btn" onclick="toggleFullscreen()">📊 Fullscreen</button>
+        </div>
+
+        <div id="error" class="error" style="display: none;"></div>
+
+        <div class="card">
+            <div id="loading" class="loading">Loading price data...</div>
+
+            <div id="content" style="display: none;">
+                <div class="chart-wrapper" id="chartWrapper">
+                    <div class="price-label" id="priceLabel">
+                        <span class="price-value" id="priceValue">-</span>
+                        <span class="price-change" id="priceChange">-</span>
+                    </div>
+                    <canvas id="priceChart" class="chart-canvas"></canvas>
+                </div>
+
+                <div class="status">
+                    <p>Last updated: <span id="timestamp">-</span> • Auto-refresh: 60s</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let chart = null;
+        let isFullscreen = false;
+        let updateInterval = null;
+        let lastUpdateTime = 0;
+        let hideButtonTimer = null;
+        const BINANCE_API = 'https://api.binance.com/api/v3';
+        const UPDATE_INTERVAL = 60000; // 60 seconds
+        const MIN_UPDATE_GAP = 5000; // Minimum 5s between updates
+        const BUTTON_HIDE_DELAY = 3000; // Hide button after 3 seconds
+
+        // Memory management: Limit data points
+        const MAX_DATA_POINTS = 100;
+
+        // Format currency with exact decimals
+        function formatCurrency(value) {
+            return new Intl.NumberFormat('en-US', {
+                minimumFractionDigits: 0,
+                maximumFractionDigits: 0,
+            }).format(value);
+        }
+
+        // Throttle updates to prevent excessive API calls
+        function throttleUpdate() {
+            const now = Date.now();
+            if (now - lastUpdateTime < MIN_UPDATE_GAP) {
+                return false;
+            }
+            lastUpdateTime = now;
+            return true;
+        }
+
+        // Update price label position
+        function updatePriceLabelPosition(currentPrice) {
+            if (!chart || !chart.scales || !chart.scales.y) return;
+            
+            const priceLabel = document.getElementById('priceLabel');
+            const chartWrapper = document.getElementById('chartWrapper');
+            
+            // Get the Y position from the chart
+            const yPos = chart.scales.y.getPixelForValue(currentPrice);
+            
+            // Account for chart wrapper padding
+            const wrapperRect = chartWrapper.getBoundingClientRect();
+            const canvasRect = chart.canvas.getBoundingClientRect();
+            
+            // Calculate offset from wrapper top
+            const offsetFromTop = canvasRect.top - wrapperRect.top;
+            
+            // Set position (translateY(-50%) centers the label on the line)
+            priceLabel.style.top = (offsetFromTop + yPos) + 'px';
+        }
+
+        // Auto-hide exit button
+        function startHideButtonTimer() {
+            if (hideButtonTimer) clearTimeout(hideButtonTimer);
+            
+            const exitBtn = document.getElementById('exitBtn');
+            const tapHint = document.getElementById('tapHint');
+            
+            if (exitBtn) {
+                exitBtn.classList.remove('hidden');
+                if (tapHint) tapHint.classList.remove('show');
+                
+                hideButtonTimer = setTimeout(() => {
+                    exitBtn.classList.add('hidden');
+                    if (tapHint) tapHint.classList.add('show');
+                    
+                    // Hide hint after 2 seconds
+                    setTimeout(() => {
+                        if (tapHint) tapHint.classList.remove('show');
+                    }, 2000);
+                }, BUTTON_HIDE_DELAY);
+            }
+        }
+
+        // Show exit button on tap
+        function showExitButton() {
+            if (isFullscreen) {
+                startHideButtonTimer();
+            }
+        }
+
+        // Fetch Bitcoin data from Binance
+        async function fetchBitcoinData() {
+            if (!throttleUpdate()) return;
+
+            try {
+                document.getElementById('error').style.display = 'none';
+
+                // Fetch 24hr ticker data (price + change)
+                const tickerResponse = await fetch(`${BINANCE_API}/ticker/24hr?symbol=BTCUSDT`);
+                
+                if (!tickerResponse.ok) {
+                    throw new Error(`HTTP ${tickerResponse.status}: Failed to fetch ticker data`);
+                }
+
+                const tickerData = await tickerResponse.json();
+                
+                // Fetch reduced kline data (only 5-minute intervals for 24h = 288 points, then sample to 100)
+                const klinesResponse = await fetch(`${BINANCE_API}/klines?symbol=BTCUSDT&interval=5m&limit=288`);
+                
+                if (!klinesResponse.ok) {
+                    throw new Error(`HTTP ${klinesResponse.status}: Failed to fetch chart data`);
+                }
+
+                const klinesData = await klinesResponse.json();
+
+                // Get 24h change percentage
+                const priceChange24h = parseFloat(tickerData.priceChangePercent);
+
+                // Update timestamp
+                const now = new Date();
+                document.getElementById('timestamp').textContent = now.toLocaleTimeString();
+
+                // Update chart with klines data and change percentage
+                updateChart(klinesData, priceChange24h);
+
+                // Show content, hide loading
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('content').style.display = 'block';
+
+            } catch (error) {
+                console.error('Error:', error);
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('error').style.display = 'block';
+                document.getElementById('error').textContent = '⚠ ' + error.message;
+            }
+        }
+
+        // Update chart with klines data
+        function updateChart(klinesData, priceChange24h) {
+            const ctx = document.getElementById('priceChart').getContext('2d');
+            
+            // Sample data to MAX_DATA_POINTS for performance
+            const sampleRate = Math.ceil(klinesData.length / MAX_DATA_POINTS);
+            const sampledData = klinesData.filter((_, index) => index % sampleRate === 0);
+            
+            // Format data: kline format is [time, open, high, low, close, volume, ...]
+            const labels = sampledData.map(kline => {
+                const date = new Date(kline[0]);
+                return date.getHours() + ':' + String(date.getMinutes()).padStart(2, '0');
+            });
+
+            const prices = sampledData.map(kline => parseFloat(kline[4])); // Close price
+            const currentPrice = prices[prices.length - 1];
+
+            // Determine color based on 24h change
+            const isPositive = priceChange24h >= 0;
+            const chartColor = isPositive ? '#00c896' : '#ff4444';
+            const bgColor = isPositive ? 'rgba(0, 200, 150, 0.1)' : 'rgba(255, 68, 68, 0.1)';
+
+            // Update price label
+            document.getElementById('priceValue').textContent = '$' + formatCurrency(currentPrice);
+            document.getElementById('priceChange').textContent = (isPositive ? '+' : '') + priceChange24h.toFixed(2) + '%';
+            
+            // Update label color
+            const priceLabel = document.getElementById('priceLabel');
+            priceLabel.style.backgroundColor = chartColor;
+
+            if (chart) {
+                // Update existing chart (more efficient than recreating)
+                chart.data.labels = labels;
+                chart.data.datasets[0].data = prices;
+                chart.data.datasets[0].borderColor = chartColor;
+                chart.data.datasets[0].backgroundColor = bgColor;
+                chart.data.datasets[0].pointHoverBackgroundColor = chartColor;
+                chart.update('none'); // 'none' mode disables animations for better performance
+                
+                // Update label position after chart is updated
+                setTimeout(() => updatePriceLabelPosition(currentPrice), 50);
+            } else {
+                chart = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            label: 'BTC/USDT',
+                            data: prices,
+                            borderColor: chartColor,
+                            backgroundColor: bgColor,
+                            borderWidth: 2,
+                            fill: true,
+                            tension: 0.1,
+                            pointRadius: 0,
+                            pointHoverRadius: 4,
+                            pointHoverBackgroundColor: chartColor,
+                            pointHoverBorderColor: '#fff',
+                            pointHoverBorderWidth: 2,
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        animation: false, // Disable animations for better performance
+                        interaction: {
+                            intersect: false,
+                            mode: 'index',
+                        },
+                        plugins: {
+                            legend: {
+                                display: false
+                            },
+                            tooltip: {
+                                enabled: true,
+                                backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                                padding: 10,
+                                displayColors: false,
+                                callbacks: {
+                                    label: function(context) {
+                                        return '$' + formatCurrency(context.parsed.y);
+                                    }
+                                }
+                            }
+                        },
+                        scales: {
+                            y: {
+                                position: 'right',
+                                grid: {
+                                    color: '#333',
+                                    drawBorder: false
+                                },
+                                ticks: {
+                                    display: false
+                                }
+                            },
+                            x: {
+                                grid: {
+                                    display: false
+                                },
+                                ticks: {
+                                    color: '#888',
+                                    maxRotation: 0,
+                                    autoSkipPadding: 20,
+                                    maxTicksLimit: 8
+                                }
+                            }
+                        }
+                    }
+                });
+
+                // Position label after initial render
+                setTimeout(() => updatePriceLabelPosition(currentPrice), 100);
+            }
+        }
+
+        // Fullscreen toggle
+        function toggleFullscreen() {
+            const container = document.getElementById('mainContainer');
+            
+            if (!isFullscreen) {
+                // Enter fullscreen
+                container.classList.add('fullscreen-mode');
+                
+                // Hide header and controls
+                document.querySelector('.header').style.display = 'none';
+                document.querySelector('.controls').style.display = 'none';
+                document.querySelector('.status').style.display = 'none';
+                
+                // Add exit button
+                const exitBtn = document.createElement('button');
+                exitBtn.className = 'exit-fullscreen';
+                exitBtn.textContent = '✕ Exit';
+                exitBtn.onclick = toggleFullscreen;
+                exitBtn.id = 'exitBtn';
+                document.body.appendChild(exitBtn);
+                
+                // Add tap hint
+                const tapHint = document.createElement('div');
+                tapHint.className = 'tap-hint';
+                tapHint.textContent = 'Tap screen to show exit button';
+                tapHint.id = 'tapHint';
+                document.body.appendChild(tapHint);
+                
+                // Add tap listener to show button
+                document.addEventListener('click', showExitButton);
+                document.addEventListener('touchstart', showExitButton);
+                
+                isFullscreen = true;
+                
+                // Start auto-hide timer
+                startHideButtonTimer();
+                
+                // Resize chart and reposition label
+                if (chart) {
+                    setTimeout(() => {
+                        chart.resize();
+                        const lastPrice = chart.data.datasets[0].data[chart.data.datasets[0].data.length - 1];
+                        updatePriceLabelPosition(lastPrice);
+                    }, 100);
+                }
+            } else {
+                // Exit fullscreen
+                container.classList.remove('fullscreen-mode');
+                
+                // Show header and controls
+                document.querySelector('.header').style.display = 'block';
+                document.querySelector('.controls').style.display = 'flex';
+                document.querySelector('.status').style.display = 'block';
+                
+                // Remove exit button and hint
+                const exitBtn = document.getElementById('exitBtn');
+                const tapHint = document.getElementById('tapHint');
+                if (exitBtn) exitBtn.remove();
+                if (tapHint) tapHint.remove();
+                
+                // Remove tap listeners
+                document.removeEventListener('click', showExitButton);
+                document.removeEventListener('touchstart', showExitButton);
+                
+                // Clear timer
+                if (hideButtonTimer) clearTimeout(hideButtonTimer);
+                
+                isFullscreen = false;
+                
+                // Resize chart and reposition label
+                if (chart) {
+                    setTimeout(() => {
+                        chart.resize();
+                        const lastPrice = chart.data.datasets[0].data[chart.data.datasets[0].data.length - 1];
+                        updatePriceLabelPosition(lastPrice);
+                    }, 100);
+                }
+            }
+        }
+
+        // Page Visibility API: Pause updates when tab is hidden
+        document.addEventListener('visibilitychange', function() {
+            if (document.hidden) {
+                // Clear interval when page is hidden
+                if (updateInterval) {
+                    clearInterval(updateInterval);
+                    updateInterval = null;
+                }
+            } else {
+                // Resume updates when page becomes visible
+                if (!updateInterval) {
+                    fetchBitcoinData(); // Immediate update
+                    updateInterval = setInterval(fetchBitcoinData, UPDATE_INTERVAL);
+                }
+            }
+        });
+
+        // Handle orientation change
+        window.addEventListener('orientationchange', function() {
+            if (chart) {
+                setTimeout(() => {
+                    chart.resize();
+                    const lastPrice = chart.data.datasets[0].data[chart.data.datasets[0].data.length - 1];
+                    updatePriceLabelPosition(lastPrice);
+                }, 200);
+            }
+        });
+
+        // Handle window resize
+        window.addEventListener('resize', function() {
+            if (chart) {
+                setTimeout(() => {
+                    chart.resize();
+                    const lastPrice = chart.data.datasets[0].data[chart.data.datasets[0].data.length - 1];
+                    updatePriceLabelPosition(lastPrice);
+                }, 100);
+            }
+        });
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', function() {
+            if (chart) {
+                chart.destroy();
+                chart = null;
+            }
+            if (updateInterval) {
+                clearInterval(updateInterval);
+            }
+            if (hideButtonTimer) {
+                clearTimeout(hideButtonTimer);
+            }
+        });
+
+        // Initial fetch
+        fetchBitcoinData();
+
+        // Auto-refresh every 60 seconds
+        updateInterval = setInterval(fetchBitcoinData, UPDATE_INTERVAL);
+    </script>
+</body>
+</html>
