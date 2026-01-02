@@ -169,34 +169,34 @@
             font-size: 14px;
         }
 
-        /* Fullscreen mode */
-        .fullscreen-mode {
+        /* True fullscreen mode - hides ALL system UI */
+        .fullscreen-container {
             position: fixed;
             top: 0;
             left: 0;
             width: 100vw;
             height: 100vh;
             background-color: var(--color-bg);
-            z-index: 1000;
+            z-index: 9999;
             padding: 12px;
         }
 
-        .fullscreen-mode .chart-wrapper {
+        .fullscreen-container .chart-wrapper {
             height: calc(100vh - 24px);
             padding-right: 130px;
             padding-bottom: 16px;
         }
 
-        .fullscreen-mode .price-label {
+        .fullscreen-container .price-label {
             right: 20px;
             padding: 10px 14px;
         }
 
-        .fullscreen-mode .price-value {
+        .fullscreen-container .price-value {
             font-size: 18px;
         }
 
-        .fullscreen-mode .price-change {
+        .fullscreen-container .price-change {
             font-size: 14px;
         }
 
@@ -212,7 +212,7 @@
             font-weight: 600;
             font-size: 13px;
             cursor: pointer;
-            z-index: 1001;
+            z-index: 10000;
             box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
             opacity: 1;
             transition: opacity 0.3s ease;
@@ -233,7 +233,7 @@
             padding: 8px 16px;
             border-radius: 20px;
             font-size: 11px;
-            z-index: 1002;
+            z-index: 10001;
             opacity: 0;
             transition: opacity 0.3s ease;
             pointer-events: none;
@@ -265,7 +265,7 @@
                 height: calc(100vh - 200px);
             }
 
-            .fullscreen-mode .chart-wrapper {
+            .fullscreen-container .chart-wrapper {
                 height: calc(100vh - 24px);
             }
 
@@ -371,12 +371,14 @@
         let websocket = null;
         let currentPrice = 0;
         let priceChange24h = 0;
+        let reconnectAttempts = 0;
         
         const BINANCE_API = 'https://api.binance.com/api/v3';
         const BINANCE_WS = 'wss://stream.binance.com:9443/ws/btcusdt@ticker';
-        const CHART_UPDATE_INTERVAL = 60000; // Update chart every 60 seconds
+        const CHART_UPDATE_INTERVAL = 60000;
         const BUTTON_HIDE_DELAY = 3000;
         const MAX_DATA_POINTS = 120;
+        const MAX_RECONNECT_DELAY = 30000; // Max 30 seconds between reconnects
 
         // Format currency
         function formatCurrency(value) {
@@ -421,18 +423,23 @@
             document.getElementById('timestamp').textContent = now.toLocaleTimeString();
         }
 
-        // Connect to Binance WebSocket for real-time price updates
+        // Connect to Binance WebSocket with exponential backoff
         function connectWebSocket() {
+            if (websocket && (websocket.readyState === WebSocket.CONNECTING || websocket.readyState === WebSocket.OPEN)) {
+                return; // Already connected or connecting
+            }
+
             websocket = new WebSocket(BINANCE_WS);
             
             websocket.onopen = function() {
                 console.log('WebSocket connected');
+                reconnectAttempts = 0; // Reset on successful connection
             };
             
             websocket.onmessage = function(event) {
                 const data = JSON.parse(event.data);
-                const price = parseFloat(data.c); // Current price
-                const change24h = parseFloat(data.P); // 24h price change percentage
+                const price = parseFloat(data.c);
+                const change24h = parseFloat(data.P);
                 
                 updatePriceDisplay(price, change24h);
             };
@@ -442,8 +449,14 @@
             };
             
             websocket.onclose = function() {
-                console.log('WebSocket closed, reconnecting in 5s...');
-                setTimeout(connectWebSocket, 5000);
+                console.log('WebSocket closed, reconnecting...');
+                
+                // Exponential backoff: 5s, 10s, 20s, 30s (max)
+                const delay = Math.min(5000 * Math.pow(2, reconnectAttempts), MAX_RECONNECT_DELAY);
+                reconnectAttempts++;
+                
+                console.log(`Reconnecting in ${delay/1000}s... (attempt ${reconnectAttempts})`);
+                setTimeout(connectWebSocket, delay);
             };
         }
 
@@ -594,16 +607,28 @@
             }
         }
 
-        // Fullscreen toggle
+        // True fullscreen toggle (hides system UI)
         function toggleFullscreen() {
-            const container = document.getElementById('mainContainer');
-            
             if (!isFullscreen) {
-                container.classList.add('fullscreen-mode');
+                // Enter TRUE fullscreen - hide status bar, nav bar, etc.
+                const elem = document.documentElement;
+                
+                if (elem.requestFullscreen) {
+                    elem.requestFullscreen();
+                } else if (elem.webkitRequestFullscreen) { /* Safari */
+                    elem.webkitRequestFullscreen();
+                } else if (elem.msRequestFullscreen) { /* IE11 */
+                    elem.msRequestFullscreen();
+                }
+                
+                // Apply fullscreen styles
+                const container = document.getElementById('mainContainer');
+                container.classList.add('fullscreen-container');
                 document.querySelector('.header').style.display = 'none';
                 document.querySelector('.controls').style.display = 'none';
                 document.querySelector('.status').style.display = 'none';
                 
+                // Add exit button
                 const exitBtn = document.createElement('button');
                 exitBtn.className = 'exit-fullscreen';
                 exitBtn.textContent = '✕ Exit';
@@ -611,12 +636,14 @@
                 exitBtn.id = 'exitBtn';
                 document.body.appendChild(exitBtn);
                 
+                // Add tap hint
                 const tapHint = document.createElement('div');
                 tapHint.className = 'tap-hint';
                 tapHint.textContent = 'Tap screen to show exit button';
                 tapHint.id = 'tapHint';
                 document.body.appendChild(tapHint);
                 
+                // Add tap listener
                 document.addEventListener('click', showExitButton);
                 document.addEventListener('touchstart', showExitButton);
                 
@@ -630,16 +657,29 @@
                     }, 100);
                 }
             } else {
-                container.classList.remove('fullscreen-mode');
+                // Exit TRUE fullscreen
+                if (document.exitFullscreen) {
+                    document.exitFullscreen();
+                } else if (document.webkitExitFullscreen) { /* Safari */
+                    document.webkitExitFullscreen();
+                } else if (document.msExitFullscreen) { /* IE11 */
+                    document.msExitFullscreen();
+                }
+                
+                // Remove fullscreen styles
+                const container = document.getElementById('mainContainer');
+                container.classList.remove('fullscreen-container');
                 document.querySelector('.header').style.display = 'block';
                 document.querySelector('.controls').style.display = 'flex';
                 document.querySelector('.status').style.display = 'block';
                 
+                // Remove exit button and hint
                 const exitBtn = document.getElementById('exitBtn');
                 const tapHint = document.getElementById('tapHint');
                 if (exitBtn) exitBtn.remove();
                 if (tapHint) tapHint.remove();
                 
+                // Remove tap listeners
                 document.removeEventListener('click', showExitButton);
                 document.removeEventListener('touchstart', showExitButton);
                 
@@ -656,21 +696,47 @@
             }
         }
 
-        // Page visibility handling
+        // Listen for fullscreen change (e.g., user presses ESC or back button)
+        document.addEventListener('fullscreenchange', function() {
+            if (!document.fullscreenElement && isFullscreen) {
+                toggleFullscreen(); // Sync our state
+            }
+        });
+
+        document.addEventListener('webkitfullscreenchange', function() {
+            if (!document.webkitFullscreenElement && isFullscreen) {
+                toggleFullscreen();
+            }
+        });
+
+        // Page visibility handling - reconnects when page becomes visible
         document.addEventListener('visibilitychange', function() {
             if (document.hidden) {
+                console.log('Page hidden - pausing updates');
                 if (websocket) websocket.close();
                 if (chartUpdateInterval) {
                     clearInterval(chartUpdateInterval);
                     chartUpdateInterval = null;
                 }
             } else {
-                connectWebSocket();
+                console.log('Page visible - resuming updates');
+                connectWebSocket(); // Will auto-reconnect
                 fetchChartData();
                 if (!chartUpdateInterval) {
                     chartUpdateInterval = setInterval(fetchChartData, CHART_UPDATE_INTERVAL);
                 }
             }
+        });
+
+        // Online/Offline detection - reconnects when WiFi comes back
+        window.addEventListener('online', function() {
+            console.log('Internet connection restored!');
+            connectWebSocket();
+            fetchChartData();
+        });
+
+        window.addEventListener('offline', function() {
+            console.log('Internet connection lost');
         });
 
         // Orientation and resize handling
