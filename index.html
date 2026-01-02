@@ -342,7 +342,7 @@
                 </div>
 
                 <div class="status">
-                    <p>Last updated: <span id="timestamp">-</span> • Auto-refresh: 60s</p>
+                    <p>Last updated: <span id="timestamp">-</span> • Auto-refresh: 30s</p>
                 </div>
             </div>
         </div>
@@ -355,7 +355,7 @@
         let lastUpdateTime = 0;
         let hideButtonTimer = null;
         const BINANCE_API = 'https://api.binance.com/api/v3';
-        const UPDATE_INTERVAL = 60000; // 60 seconds
+        const UPDATE_INTERVAL = 30000; // 30 seconds
         const MIN_UPDATE_GAP = 5000; // Minimum 5s between updates
         const BUTTON_HIDE_DELAY = 3000; // Hide button after 3 seconds
 
@@ -730,7 +730,7 @@
         // Initial fetch
         fetchBitcoinData();
 
-        // Auto-refresh every 60 seconds
+        // Auto-refresh every 30 seconds
         updateInterval = setInterval(fetchBitcoinData, UPDATE_INTERVAL);
     </script>
 </body>
