@@ -453,16 +453,41 @@
 
         async function fetchChartData() {
             try {
-                // Fetch extra data to ensure we have at least 1440 minutes
-                const response = await fetch(`${BINANCE_API}/klines?symbol=BTCUSDT&interval=1m&limit=1500`);
+                const now = Date.now();
+                const twentyFourHoursAgo = now - (24 * 60 * 60 * 1000);
                 
-                if (!response.ok) {
-                    throw new Error(`HTTP ${response.status}: Failed to fetch chart data`);
+                // Binance limit is 1000 candles per request
+                // So we need 2 requests: first 1000 candles + remaining 440 candles
+                
+                // First batch: 1000 candles starting from 24 hours ago
+                const firstBatchStart = twentyFourHoursAgo;
+                const firstBatchEnd = twentyFourHoursAgo + (1000 * 60 * 1000); // 1000 minutes later
+                
+                const response1 = await fetch(
+                    `${BINANCE_API}/klines?symbol=BTCUSDT&interval=1m&startTime=${firstBatchStart}&endTime=${firstBatchEnd}&limit=1000`
+                );
+                
+                if (!response1.ok) {
+                    throw new Error(`HTTP ${response1.status}: Failed to fetch chart data (batch 1)`);
                 }
-
-                const allKlines = await response.json();
                 
-                // Take ONLY the last 1440 candles (exactly 24 hours)
+                const batch1 = await response1.json();
+                
+                // Second batch: remaining 440 candles (or use limit=1000 to get up to current time)
+                const response2 = await fetch(
+                    `${BINANCE_API}/klines?symbol=BTCUSDT&interval=1m&startTime=${firstBatchEnd}&limit=1000`
+                );
+                
+                if (!response2.ok) {
+                    throw new Error(`HTTP ${response2.status}: Failed to fetch chart data (batch 2)`);
+                }
+                
+                const batch2 = await response2.json();
+                
+                // Combine both batches
+                const allKlines = [...batch1, ...batch2];
+                
+                // Take exactly the last 1440 candles (24 hours)
                 const klinesData = allKlines.slice(-1440);
                 
                 updateChart(klinesData);
@@ -481,7 +506,6 @@
         function updateChart(klinesData) {
             const ctx = document.getElementById('priceChart').getContext('2d');
             
-            // Get exact time range (should be 24 hours)
             const firstTime = new Date(klinesData[0][0]);
             const lastTime = new Date(klinesData[klinesData.length - 1][0]);
             const hoursDiff = (lastTime - firstTime) / (1000 * 60 * 60);
@@ -489,7 +513,6 @@
             console.log(`Chart: ${firstTime.toLocaleString()} → ${lastTime.toLocaleString()}`);
             console.log(`Time span: ${hoursDiff.toFixed(1)} hours (${klinesData.length} candles)`);
             
-            // Sample evenly across the FULL 1440 candles
             const sampleRate = Math.ceil(klinesData.length / MAX_DATA_POINTS);
             const sampledData = [];
             
@@ -497,7 +520,6 @@
                 sampledData.push(klinesData[i]);
             }
             
-            // ALWAYS include the very last candle (current time)
             const lastCandle = klinesData[klinesData.length - 1];
             if (sampledData[sampledData.length - 1][0] !== lastCandle[0]) {
                 sampledData.push(lastCandle);
