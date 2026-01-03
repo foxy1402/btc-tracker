@@ -169,7 +169,7 @@
             font-size: 14px;
         }
 
-        /* True fullscreen mode - hides ALL system UI */
+        /* True fullscreen mode */
         .fullscreen-container {
             position: fixed;
             top: 0;
@@ -378,7 +378,7 @@
         const CHART_UPDATE_INTERVAL = 60000;
         const BUTTON_HIDE_DELAY = 3000;
         const MAX_DATA_POINTS = 120;
-        const MAX_RECONNECT_DELAY = 30000; // Max 30 seconds between reconnects
+        const MAX_RECONNECT_DELAY = 30000;
 
         // Format currency
         function formatCurrency(value) {
@@ -426,14 +426,14 @@
         // Connect to Binance WebSocket with exponential backoff
         function connectWebSocket() {
             if (websocket && (websocket.readyState === WebSocket.CONNECTING || websocket.readyState === WebSocket.OPEN)) {
-                return; // Already connected or connecting
+                return;
             }
 
             websocket = new WebSocket(BINANCE_WS);
             
             websocket.onopen = function() {
                 console.log('WebSocket connected');
-                reconnectAttempts = 0; // Reset on successful connection
+                reconnectAttempts = 0;
             };
             
             websocket.onmessage = function(event) {
@@ -451,7 +451,6 @@
             websocket.onclose = function() {
                 console.log('WebSocket closed, reconnecting...');
                 
-                // Exponential backoff: 5s, 10s, 20s, 30s (max)
                 const delay = Math.min(5000 * Math.pow(2, reconnectAttempts), MAX_RECONNECT_DELAY);
                 reconnectAttempts++;
                 
@@ -463,7 +462,7 @@
         // Fetch historical chart data
         async function fetchChartData() {
             try {
-                const response = await fetch(`${BINANCE_API}/klines?symbol=BTCUSDT&interval=1m&limit=1440`);
+                const response = await fetch(`${BINANCE_API}/klines?symbol=BTCUSDT&interval=1m&limit=1500`);
                 
                 if (!response.ok) {
                     throw new Error(`HTTP ${response.status}: Failed to fetch chart data`);
@@ -487,12 +486,26 @@
         function updateChart(klinesData) {
             const ctx = document.getElementById('priceChart').getContext('2d');
             
+            // Get the actual time range
+            const firstTime = new Date(klinesData[0][0]);
+            const lastTime = new Date(klinesData[klinesData.length - 1][0]);
+            
+            console.log(`Chart data range: ${firstTime.toLocaleTimeString()} to ${lastTime.toLocaleTimeString()}`);
+            
+            // Sample data evenly to MAX_DATA_POINTS
             const sampleRate = Math.ceil(klinesData.length / MAX_DATA_POINTS);
             const sampledData = klinesData.filter((_, index) => index % sampleRate === 0);
             
+            // Always include the last data point to show current time
+            if (klinesData.length > 0 && sampledData[sampledData.length - 1][0] !== klinesData[klinesData.length - 1][0]) {
+                sampledData.push(klinesData[klinesData.length - 1]);
+            }
+            
             const labels = sampledData.map(kline => {
                 const date = new Date(kline[0]);
-                return date.getHours() + ':' + String(date.getMinutes()).padStart(2, '0');
+                const hours = date.getHours();
+                const minutes = String(date.getMinutes()).padStart(2, '0');
+                return hours + ':' + minutes;
             });
 
             const prices = sampledData.map(kline => parseFloat(kline[4]));
@@ -570,7 +583,7 @@
                                     color: '#888',
                                     maxRotation: 0,
                                     autoSkipPadding: 20,
-                                    maxTicksLimit: 8
+                                    maxTicksLimit: 10
                                 }
                             }
                         }
@@ -607,28 +620,25 @@
             }
         }
 
-        // True fullscreen toggle (hides system UI)
+        // True fullscreen toggle
         function toggleFullscreen() {
             if (!isFullscreen) {
-                // Enter TRUE fullscreen - hide status bar, nav bar, etc.
                 const elem = document.documentElement;
                 
                 if (elem.requestFullscreen) {
                     elem.requestFullscreen();
-                } else if (elem.webkitRequestFullscreen) { /* Safari */
+                } else if (elem.webkitRequestFullscreen) {
                     elem.webkitRequestFullscreen();
-                } else if (elem.msRequestFullscreen) { /* IE11 */
+                } else if (elem.msRequestFullscreen) {
                     elem.msRequestFullscreen();
                 }
                 
-                // Apply fullscreen styles
                 const container = document.getElementById('mainContainer');
                 container.classList.add('fullscreen-container');
                 document.querySelector('.header').style.display = 'none';
                 document.querySelector('.controls').style.display = 'none';
                 document.querySelector('.status').style.display = 'none';
                 
-                // Add exit button
                 const exitBtn = document.createElement('button');
                 exitBtn.className = 'exit-fullscreen';
                 exitBtn.textContent = '✕ Exit';
@@ -636,14 +646,12 @@
                 exitBtn.id = 'exitBtn';
                 document.body.appendChild(exitBtn);
                 
-                // Add tap hint
                 const tapHint = document.createElement('div');
                 tapHint.className = 'tap-hint';
                 tapHint.textContent = 'Tap screen to show exit button';
                 tapHint.id = 'tapHint';
                 document.body.appendChild(tapHint);
                 
-                // Add tap listener
                 document.addEventListener('click', showExitButton);
                 document.addEventListener('touchstart', showExitButton);
                 
@@ -657,29 +665,25 @@
                     }, 100);
                 }
             } else {
-                // Exit TRUE fullscreen
                 if (document.exitFullscreen) {
                     document.exitFullscreen();
-                } else if (document.webkitExitFullscreen) { /* Safari */
+                } else if (document.webkitExitFullscreen) {
                     document.webkitExitFullscreen();
-                } else if (document.msExitFullscreen) { /* IE11 */
+                } else if (document.msExitFullscreen) {
                     document.msExitFullscreen();
                 }
                 
-                // Remove fullscreen styles
                 const container = document.getElementById('mainContainer');
                 container.classList.remove('fullscreen-container');
                 document.querySelector('.header').style.display = 'block';
                 document.querySelector('.controls').style.display = 'flex';
                 document.querySelector('.status').style.display = 'block';
                 
-                // Remove exit button and hint
                 const exitBtn = document.getElementById('exitBtn');
                 const tapHint = document.getElementById('tapHint');
                 if (exitBtn) exitBtn.remove();
                 if (tapHint) tapHint.remove();
                 
-                // Remove tap listeners
                 document.removeEventListener('click', showExitButton);
                 document.removeEventListener('touchstart', showExitButton);
                 
@@ -696,10 +700,10 @@
             }
         }
 
-        // Listen for fullscreen change (e.g., user presses ESC or back button)
+        // Listen for fullscreen change
         document.addEventListener('fullscreenchange', function() {
             if (!document.fullscreenElement && isFullscreen) {
-                toggleFullscreen(); // Sync our state
+                toggleFullscreen();
             }
         });
 
@@ -709,7 +713,7 @@
             }
         });
 
-        // Page visibility handling - reconnects when page becomes visible
+        // Page visibility handling
         document.addEventListener('visibilitychange', function() {
             if (document.hidden) {
                 console.log('Page hidden - pausing updates');
@@ -720,7 +724,7 @@
                 }
             } else {
                 console.log('Page visible - resuming updates');
-                connectWebSocket(); // Will auto-reconnect
+                connectWebSocket();
                 fetchChartData();
                 if (!chartUpdateInterval) {
                     chartUpdateInterval = setInterval(fetchChartData, CHART_UPDATE_INTERVAL);
@@ -728,7 +732,7 @@
             }
         });
 
-        // Online/Offline detection - reconnects when WiFi comes back
+        // Online/Offline detection
         window.addEventListener('online', function() {
             console.log('Internet connection restored!');
             connectWebSocket();
