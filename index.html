@@ -1,10 +1,29 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description"
+        content="Real-time Bitcoin price tracker with live Binance data, 24-hour chart, and price change indicators.">
+    <meta name="theme-color" content="#1a1a1a">
+    <meta property="og:title" content="Bitcoin Price Tracker">
+    <meta property="og:description" content="Real-time BTC/USDT price tracking with live Binance WebSocket data.">
+    <meta property="og:type" content="website">
+    <meta property="og:image"
+        content="https://upload.wikimedia.org/wikipedia/commons/thumb/4/46/Bitcoin.svg/1200px-Bitcoin.svg.png">
     <title>Bitcoin Price Tracker</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <!-- Favicon -->
+    <link rel="icon"
+        href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>₿</text></svg>">
+
+    <!-- Preconnect for performance -->
+    <link rel="preconnect" href="https://api.binance.com">
+    <link rel="preconnect" href="https://stream.binance.com">
+    <link rel="preconnect" href="https://cdn.jsdelivr.net">
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js" defer></script>
     <style>
         :root {
             --color-bg: #1a1a1a;
@@ -147,8 +166,15 @@
         }
 
         @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.3; }
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.3;
+            }
         }
 
         .loading {
@@ -167,6 +193,42 @@
             margin-bottom: 20px;
             text-align: center;
             font-size: 14px;
+        }
+
+        .error .retry-btn {
+            margin-top: 12px;
+            padding: 8px 20px;
+            background-color: var(--color-danger);
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: opacity 0.2s;
+        }
+
+        .error .retry-btn:hover {
+            opacity: 0.8;
+        }
+
+        .offline-indicator {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            background-color: var(--color-danger);
+            color: #fff;
+            text-align: center;
+            padding: 8px;
+            font-size: 13px;
+            font-weight: 600;
+            z-index: 10002;
+            transform: translateY(-100%);
+            transition: transform 0.3s ease;
+        }
+
+        .offline-indicator.show {
+            transform: translateY(0);
         }
 
         .fullscreen-container {
@@ -327,7 +389,13 @@
         }
     </style>
 </head>
+
 <body>
+    <noscript>
+        <div style="background:#ff4444;color:#fff;padding:20px;text-align:center;font-family:sans-serif;">
+            JavaScript is required to use Bitcoin Price Tracker. Please enable JavaScript in your browser.
+        </div>
+    </noscript>
     <div class="container" id="mainContainer">
         <div class="header">
             <h1>₿ BTCUSDT</h1>
@@ -339,15 +407,16 @@
         </div>
 
         <div id="error" class="error" style="display: none;"></div>
+        <div id="offlineIndicator" class="offline-indicator">⚠ No internet connection</div>
 
         <div class="card">
             <div id="loading" class="loading">Loading price data...</div>
 
             <div id="content" style="display: none;">
                 <div class="chart-wrapper" id="chartWrapper">
-                    <div class="price-label" id="priceLabel">
-                        <span class="price-value" id="priceValue">-</span>
-                        <span class="price-change" id="priceChange">-</span>
+                    <div class="price-label" id="priceLabel" role="status" aria-live="polite">
+                        <span class="price-value" id="priceValue" aria-label="Current Bitcoin price">-</span>
+                        <span class="price-change" id="priceChange" aria-label="24-hour price change">-</span>
                     </div>
                     <canvas id="priceChart" class="chart-canvas"></canvas>
                 </div>
@@ -360,6 +429,9 @@
     </div>
 
     <script>
+        // Configuration
+        const DEBUG = false; // Set to true for development logging
+
         let chart = null;
         let isFullscreen = false;
         let chartUpdateInterval = null;
@@ -368,13 +440,19 @@
         let currentPrice = 0;
         let priceChange24h = 0;
         let reconnectAttempts = 0;
-        
+        let resizeDebounceTimer = null;
+
         const BINANCE_API = 'https://api.binance.com/api/v3';
         const BINANCE_WS = 'wss://stream.binance.com:9443/ws/btcusdt@ticker';
         const CHART_UPDATE_INTERVAL = 60000;
         const BUTTON_HIDE_DELAY = 3000;
         const MAX_DATA_POINTS = 120;
         const MAX_RECONNECT_DELAY = 30000;
+        const RESIZE_DEBOUNCE_DELAY = 150;
+
+        function log(...args) {
+            if (DEBUG) console.log(...args);
+        }
 
         function formatCurrency(value) {
             return new Intl.NumberFormat('en-US', {
@@ -385,33 +463,33 @@
 
         function updatePriceLabelPosition(price) {
             if (!chart || !chart.scales || !chart.scales.y) return;
-            
+
             const priceLabel = document.getElementById('priceLabel');
             const chartWrapper = document.getElementById('chartWrapper');
-            
+
             const yPos = chart.scales.y.getPixelForValue(price);
             const wrapperRect = chartWrapper.getBoundingClientRect();
             const canvasRect = chart.canvas.getBoundingClientRect();
             const offsetFromTop = canvasRect.top - wrapperRect.top;
-            
+
             priceLabel.style.top = (offsetFromTop + yPos) + 'px';
         }
 
         function updatePriceDisplay(price, change24h) {
             currentPrice = price;
             priceChange24h = change24h;
-            
+
             const isPositive = change24h >= 0;
             const chartColor = isPositive ? '#00c896' : '#ff4444';
-            
+
             document.getElementById('priceValue').textContent = '$' + formatCurrency(price);
             document.getElementById('priceChange').textContent = (isPositive ? '+' : '') + change24h.toFixed(2) + '%';
-            
+
             const priceLabel = document.getElementById('priceLabel');
             priceLabel.style.backgroundColor = chartColor;
-            
+
             updatePriceLabelPosition(price);
-            
+
             const now = new Date();
             document.getElementById('timestamp').textContent = now.toLocaleTimeString();
         }
@@ -422,31 +500,37 @@
             }
 
             websocket = new WebSocket(BINANCE_WS);
-            
-            websocket.onopen = function() {
-                console.log('WebSocket connected');
+
+            websocket.onopen = function () {
+                log('WebSocket connected');
                 reconnectAttempts = 0;
             };
-            
-            websocket.onmessage = function(event) {
-                const data = JSON.parse(event.data);
-                const price = parseFloat(data.c);
-                const change24h = parseFloat(data.P);
-                
-                updatePriceDisplay(price, change24h);
+
+            websocket.onmessage = function (event) {
+                try {
+                    const data = JSON.parse(event.data);
+                    const price = parseFloat(data.c);
+                    const change24h = parseFloat(data.P);
+
+                    if (!isNaN(price) && !isNaN(change24h)) {
+                        updatePriceDisplay(price, change24h);
+                    }
+                } catch (error) {
+                    if (DEBUG) console.error('WebSocket message parse error:', error);
+                }
             };
-            
-            websocket.onerror = function(error) {
-                console.error('WebSocket error:', error);
+
+            websocket.onerror = function (error) {
+                if (DEBUG) console.error('WebSocket error:', error);
             };
-            
-            websocket.onclose = function() {
-                console.log('WebSocket closed, reconnecting...');
-                
+
+            websocket.onclose = function () {
+                log('WebSocket closed, reconnecting...');
+
                 const delay = Math.min(5000 * Math.pow(2, reconnectAttempts), MAX_RECONNECT_DELAY);
                 reconnectAttempts++;
-                
-                console.log(`Reconnecting in ${delay/1000}s... (attempt ${reconnectAttempts})`);
+
+                log(`Reconnecting in ${delay / 1000}s... (attempt ${reconnectAttempts})`);
                 setTimeout(connectWebSocket, delay);
             };
         }
@@ -455,83 +539,93 @@
             try {
                 const now = Date.now();
                 const twentyFourHoursAgo = now - (24 * 60 * 60 * 1000);
-                
+
                 // Binance limit is 1000 candles per request
                 // So we need 2 requests: first 1000 candles + remaining 440 candles
-                
+
                 // First batch: 1000 candles starting from 24 hours ago
                 const firstBatchStart = twentyFourHoursAgo;
                 const firstBatchEnd = twentyFourHoursAgo + (1000 * 60 * 1000); // 1000 minutes later
-                
+
                 const response1 = await fetch(
                     `${BINANCE_API}/klines?symbol=BTCUSDT&interval=1m&startTime=${firstBatchStart}&endTime=${firstBatchEnd}&limit=1000`
                 );
-                
+
                 if (!response1.ok) {
                     throw new Error(`HTTP ${response1.status}: Failed to fetch chart data (batch 1)`);
                 }
-                
+
                 const batch1 = await response1.json();
-                
+
                 // Second batch: remaining 440 candles (or use limit=1000 to get up to current time)
                 const response2 = await fetch(
                     `${BINANCE_API}/klines?symbol=BTCUSDT&interval=1m&startTime=${firstBatchEnd}&limit=1000`
                 );
-                
+
                 if (!response2.ok) {
                     throw new Error(`HTTP ${response2.status}: Failed to fetch chart data (batch 2)`);
                 }
-                
+
                 const batch2 = await response2.json();
-                
+
                 // Combine both batches
                 const allKlines = [...batch1, ...batch2];
-                
+
                 // Take exactly the last 1440 candles (24 hours)
                 const klinesData = allKlines.slice(-1440);
-                
+
                 updateChart(klinesData);
-                
+
                 document.getElementById('loading').style.display = 'none';
                 document.getElementById('content').style.display = 'block';
 
             } catch (error) {
-                console.error('Error:', error);
+                if (DEBUG) console.error('Error:', error);
                 document.getElementById('loading').style.display = 'none';
-                document.getElementById('error').style.display = 'block';
-                document.getElementById('error').textContent = '⚠ ' + error.message;
+                const errorEl = document.getElementById('error');
+                errorEl.style.display = 'block';
+                // Safe DOM manipulation to prevent XSS
+                errorEl.textContent = '';
+                const msgDiv = document.createElement('div');
+                msgDiv.textContent = '⚠ ' + error.message;
+                const retryBtn = document.createElement('button');
+                retryBtn.className = 'retry-btn';
+                retryBtn.textContent = 'Retry';
+                retryBtn.onclick = retryFetch;
+                errorEl.appendChild(msgDiv);
+                errorEl.appendChild(retryBtn);
             }
         }
 
         function updateChart(klinesData) {
             const ctx = document.getElementById('priceChart').getContext('2d');
-            
+
             const firstTime = new Date(klinesData[0][0]);
             const lastTime = new Date(klinesData[klinesData.length - 1][0]);
             const hoursDiff = (lastTime - firstTime) / (1000 * 60 * 60);
-            
-            console.log(`Chart: ${firstTime.toLocaleString()} → ${lastTime.toLocaleString()}`);
-            console.log(`Time span: ${hoursDiff.toFixed(1)} hours (${klinesData.length} candles)`);
-            
+
+            log(`Chart: ${firstTime.toLocaleString()} → ${lastTime.toLocaleString()}`);
+            log(`Time span: ${hoursDiff.toFixed(1)} hours (${klinesData.length} candles)`);
+
             const sampleRate = Math.ceil(klinesData.length / MAX_DATA_POINTS);
             const sampledData = [];
-            
+
             for (let i = 0; i < klinesData.length; i += sampleRate) {
                 sampledData.push(klinesData[i]);
             }
-            
+
             const lastCandle = klinesData[klinesData.length - 1];
             if (sampledData[sampledData.length - 1][0] !== lastCandle[0]) {
                 sampledData.push(lastCandle);
             }
-            
+
             const labels = sampledData.map(kline => {
                 const date = new Date(kline[0]);
                 return date.getHours() + ':' + String(date.getMinutes()).padStart(2, '0');
             });
 
             const prices = sampledData.map(kline => parseFloat(kline[4]));
-            
+
             const isPositive = priceChange24h >= 0;
             const chartColor = isPositive ? '#00c896' : '#ff4444';
             const bgColor = isPositive ? 'rgba(0, 200, 150, 0.1)' : 'rgba(255, 68, 68, 0.1)';
@@ -580,7 +674,7 @@
                                 padding: 10,
                                 displayColors: false,
                                 callbacks: {
-                                    label: function(context) {
+                                    label: function (context) {
                                         return '$' + formatCurrency(context.parsed.y);
                                     }
                                 }
@@ -590,8 +684,10 @@
                             y: {
                                 position: 'right',
                                 grid: {
-                                    color: '#333',
-                                    drawBorder: false
+                                    color: '#333'
+                                },
+                                border: {
+                                    display: false
                                 },
                                 ticks: {
                                     display: false
@@ -616,18 +712,18 @@
 
         function startHideButtonTimer() {
             if (hideButtonTimer) clearTimeout(hideButtonTimer);
-            
+
             const exitBtn = document.getElementById('exitBtn');
             const tapHint = document.getElementById('tapHint');
-            
+
             if (exitBtn) {
                 exitBtn.classList.remove('hidden');
                 if (tapHint) tapHint.classList.remove('show');
-                
+
                 hideButtonTimer = setTimeout(() => {
                     exitBtn.classList.add('hidden');
                     if (tapHint) tapHint.classList.add('show');
-                    
+
                     setTimeout(() => {
                         if (tapHint) tapHint.classList.remove('show');
                     }, 2000);
@@ -644,7 +740,7 @@
         function toggleFullscreen() {
             if (!isFullscreen) {
                 const elem = document.documentElement;
-                
+
                 if (elem.requestFullscreen) {
                     elem.requestFullscreen();
                 } else if (elem.webkitRequestFullscreen) {
@@ -652,32 +748,32 @@
                 } else if (elem.msRequestFullscreen) {
                     elem.msRequestFullscreen();
                 }
-                
+
                 const container = document.getElementById('mainContainer');
                 container.classList.add('fullscreen-container');
                 document.querySelector('.header').style.display = 'none';
                 document.querySelector('.controls').style.display = 'none';
                 document.querySelector('.status').style.display = 'none';
-                
+
                 const exitBtn = document.createElement('button');
                 exitBtn.className = 'exit-fullscreen';
                 exitBtn.textContent = '✕ Exit';
                 exitBtn.onclick = toggleFullscreen;
                 exitBtn.id = 'exitBtn';
                 document.body.appendChild(exitBtn);
-                
+
                 const tapHint = document.createElement('div');
                 tapHint.className = 'tap-hint';
                 tapHint.textContent = 'Tap screen to show exit button';
                 tapHint.id = 'tapHint';
                 document.body.appendChild(tapHint);
-                
+
                 document.addEventListener('click', showExitButton);
                 document.addEventListener('touchstart', showExitButton);
-                
+
                 isFullscreen = true;
                 startHideButtonTimer();
-                
+
                 if (chart) {
                     setTimeout(() => {
                         chart.resize();
@@ -692,25 +788,25 @@
                 } else if (document.msExitFullscreen) {
                     document.msExitFullscreen();
                 }
-                
+
                 const container = document.getElementById('mainContainer');
                 container.classList.remove('fullscreen-container');
                 document.querySelector('.header').style.display = 'block';
                 document.querySelector('.controls').style.display = 'flex';
                 document.querySelector('.status').style.display = 'block';
-                
+
                 const exitBtn = document.getElementById('exitBtn');
                 const tapHint = document.getElementById('tapHint');
                 if (exitBtn) exitBtn.remove();
                 if (tapHint) tapHint.remove();
-                
+
                 document.removeEventListener('click', showExitButton);
                 document.removeEventListener('touchstart', showExitButton);
-                
+
                 if (hideButtonTimer) clearTimeout(hideButtonTimer);
-                
+
                 isFullscreen = false;
-                
+
                 if (chart) {
                     setTimeout(() => {
                         chart.resize();
@@ -720,28 +816,28 @@
             }
         }
 
-        document.addEventListener('fullscreenchange', function() {
+        document.addEventListener('fullscreenchange', function () {
             if (!document.fullscreenElement && isFullscreen) {
                 toggleFullscreen();
             }
         });
 
-        document.addEventListener('webkitfullscreenchange', function() {
+        document.addEventListener('webkitfullscreenchange', function () {
             if (!document.webkitFullscreenElement && isFullscreen) {
                 toggleFullscreen();
             }
         });
 
-        document.addEventListener('visibilitychange', function() {
+        document.addEventListener('visibilitychange', function () {
             if (document.hidden) {
-                console.log('Page hidden - pausing updates');
+                log('Page hidden - pausing updates');
                 if (websocket) websocket.close();
                 if (chartUpdateInterval) {
                     clearInterval(chartUpdateInterval);
                     chartUpdateInterval = null;
                 }
             } else {
-                console.log('Page visible - resuming updates');
+                log('Page visible - resuming updates');
                 connectWebSocket();
                 fetchChartData();
                 if (!chartUpdateInterval) {
@@ -750,17 +846,26 @@
             }
         });
 
-        window.addEventListener('online', function() {
-            console.log('Internet connection restored!');
+        window.addEventListener('online', function () {
+            log('Internet connection restored!');
+            document.getElementById('offlineIndicator').classList.remove('show');
             connectWebSocket();
             fetchChartData();
         });
 
-        window.addEventListener('offline', function() {
-            console.log('Internet connection lost');
+        window.addEventListener('offline', function () {
+            log('Internet connection lost');
+            document.getElementById('offlineIndicator').classList.add('show');
         });
 
-        window.addEventListener('orientationchange', function() {
+        function retryFetch() {
+            document.getElementById('error').style.display = 'none';
+            document.getElementById('loading').style.display = 'block';
+            connectWebSocket();
+            fetchChartData();
+        }
+
+        window.addEventListener('orientationchange', function () {
             if (chart) {
                 setTimeout(() => {
                     chart.resize();
@@ -769,16 +874,17 @@
             }
         });
 
-        window.addEventListener('resize', function() {
-            if (chart) {
-                setTimeout(() => {
+        window.addEventListener('resize', function () {
+            if (resizeDebounceTimer) clearTimeout(resizeDebounceTimer);
+            resizeDebounceTimer = setTimeout(() => {
+                if (chart) {
                     chart.resize();
                     updatePriceLabelPosition(currentPrice);
-                }, 100);
-            }
+                }
+            }, RESIZE_DEBOUNCE_DELAY);
         });
 
-        window.addEventListener('beforeunload', function() {
+        window.addEventListener('beforeunload', function () {
             if (websocket) websocket.close();
             if (chart) chart.destroy();
             if (chartUpdateInterval) clearInterval(chartUpdateInterval);
@@ -790,4 +896,5 @@
         chartUpdateInterval = setInterval(fetchChartData, CHART_UPDATE_INTERVAL);
     </script>
 </body>
+
 </html>
