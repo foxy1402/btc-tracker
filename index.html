@@ -435,6 +435,8 @@
         let chart = null;
         let isFullscreen = false;
         let chartUpdateInterval = null;
+        let chartRebuildInterval = null;
+        let firefoxRefreshInterval = null;
         let hideButtonTimer = null;
         let websocket = null;
         let currentPrice = 0;
@@ -445,6 +447,8 @@
         const BINANCE_API = 'https://api.binance.com/api/v3';
         const BINANCE_WS = 'wss://stream.binance.com:9443/ws/btcusdt@ticker';
         const CHART_UPDATE_INTERVAL = 60000;
+        const CHART_REBUILD_INTERVAL = 6 * 60 * 60 * 1000;
+        const FIREFOX_CHART_REFRESH = 30 * 60 * 1000;
         const BUTTON_HIDE_DELAY = 3000;
         const MAX_DATA_POINTS = 120;
         const MAX_RECONNECT_DELAY = 30000;
@@ -512,7 +516,7 @@
                     const price = parseFloat(data.c);
                     const change24h = parseFloat(data.P);
 
-                    if (!isNaN(price) && !isNaN(change24h)) {
+                    if (!isNaN(price) && !isNaN(change24h) && isFinite(price) && isFinite(change24h) && price > 0 && price < 1000000) {
                         updatePriceDisplay(price, change24h);
                     }
                 } catch (error) {
@@ -624,7 +628,18 @@
                 return date.getHours() + ':' + String(date.getMinutes()).padStart(2, '0');
             });
 
-            const prices = sampledData.map(kline => parseFloat(kline[4]));
+            const prices = sampledData.map(kline => parseFloat(kline[4]))
+                .filter(price => {
+                    return !isNaN(price) && 
+                           isFinite(price) && 
+                           price > 0 && 
+                           price < 1000000;
+                });
+
+            if (prices.length === 0) {
+                console.error('No valid price data');
+                return;
+            }
 
             const isPositive = priceChange24h >= 0;
             const chartColor = isPositive ? '#00c896' : '#ff4444';
@@ -635,6 +650,8 @@
                 chart.data.datasets[0].data = prices;
                 chart.data.datasets[0].borderColor = chartColor;
                 chart.data.datasets[0].backgroundColor = bgColor;
+                chart.options.scales.y.suggestedMin = Math.min(...prices) * 0.95;
+                chart.options.scales.y.suggestedMax = Math.max(...prices) * 1.05;
                 chart.update('none');
             } else {
                 chart = new Chart(ctx, {
@@ -683,6 +700,9 @@
                         scales: {
                             y: {
                                 position: 'right',
+                                suggestedMin: Math.min(...prices) * 0.95,
+                                suggestedMax: Math.max(...prices) * 1.05,
+                                grace: '5%',
                                 grid: {
                                     color: '#333'
                                 },
@@ -888,12 +908,33 @@
             if (websocket) websocket.close();
             if (chart) chart.destroy();
             if (chartUpdateInterval) clearInterval(chartUpdateInterval);
+            if (chartRebuildInterval) clearInterval(chartRebuildInterval);
+            if (firefoxRefreshInterval) clearInterval(firefoxRefreshInterval);
             if (hideButtonTimer) clearTimeout(hideButtonTimer);
         });
 
         connectWebSocket();
         fetchChartData();
         chartUpdateInterval = setInterval(fetchChartData, CHART_UPDATE_INTERVAL);
+
+        // Periodic chart rebuild to prevent data corruption
+        chartRebuildInterval = setInterval(() => {
+            if (chart) {
+                log('Rebuilding chart to prevent corruption');
+                chart.destroy();
+                chart = null;
+                fetchChartData();
+            }
+        }, CHART_REBUILD_INTERVAL);
+
+        // Firefox-specific handling for Android
+        const isFirefoxAndroid = /Firefox.*Android/i.test(navigator.userAgent);
+        if (isFirefoxAndroid) {
+            log('Firefox Android detected - enabling aggressive chart refresh');
+            firefoxRefreshInterval = setInterval(() => {
+                if (chart) chart.update('none');
+            }, FIREFOX_CHART_REFRESH);
+        }
     </script>
 </body>
 
