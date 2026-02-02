@@ -866,15 +866,22 @@
             }
         });
 
+        let offlineTimeout;
+        
         window.addEventListener('online', function () {
             log('Internet connection restored!');
-            document.getElementById('offlineIndicator').classList.remove('show');
+            // Auto-hide offline indicator after 3 seconds to handle VPN reconnection
+            clearTimeout(offlineTimeout);
+            offlineTimeout = setTimeout(function() {
+                document.getElementById('offlineIndicator').classList.remove('show');
+            }, 3000);
             connectWebSocket();
             fetchChartData();
         });
 
         window.addEventListener('offline', function () {
             log('Internet connection lost');
+            clearTimeout(offlineTimeout);
             document.getElementById('offlineIndicator').classList.add('show');
         });
 
