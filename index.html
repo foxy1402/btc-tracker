@@ -508,6 +508,9 @@
             websocket.onopen = function () {
                 log('WebSocket connected');
                 reconnectAttempts = 0;
+                // Hide offline indicator when WebSocket successfully connects
+                clearTimeout(offlineTimeout);
+                document.getElementById('offlineIndicator').classList.remove('show');
             };
 
             websocket.onmessage = function (event) {
@@ -530,6 +533,12 @@
 
             websocket.onclose = function () {
                 log('WebSocket closed, reconnecting...');
+
+                // Don't reconnect if offline
+                if (!navigator.onLine) {
+                    log('Offline - skipping WebSocket reconnect');
+                    return;
+                }
 
                 const delay = Math.min(5000 * Math.pow(2, reconnectAttempts), MAX_RECONNECT_DELAY);
                 reconnectAttempts++;
@@ -581,6 +590,7 @@
                 updateChart(klinesData);
 
                 document.getElementById('loading').style.display = 'none';
+                document.getElementById('error').style.display = 'none';
                 document.getElementById('content').style.display = 'block';
 
             } catch (error) {
@@ -858,6 +868,11 @@
                 }
             } else {
                 log('Page visible - resuming updates');
+                // Hide error message when page becomes visible
+                document.getElementById('error').style.display = 'none';
+                if (document.getElementById('content').style.display === 'none') {
+                    document.getElementById('loading').style.display = 'block';
+                }
                 connectWebSocket();
                 fetchChartData();
                 if (!chartUpdateInterval) {
@@ -875,14 +890,29 @@
             offlineTimeout = setTimeout(function() {
                 document.getElementById('offlineIndicator').classList.remove('show');
             }, 3000);
+            // Hide error message and show loading while reconnecting
+            document.getElementById('error').style.display = 'none';
+            if (document.getElementById('content').style.display === 'none') {
+                document.getElementById('loading').style.display = 'block';
+            }
+            // Reset reconnect attempts when connection is restored
+            reconnectAttempts = 0;
             connectWebSocket();
             fetchChartData();
+            // Restart chart update interval if stopped
+            if (!chartUpdateInterval) {
+                chartUpdateInterval = setInterval(fetchChartData, CHART_UPDATE_INTERVAL);
+            }
         });
 
         window.addEventListener('offline', function () {
             log('Internet connection lost');
             clearTimeout(offlineTimeout);
             document.getElementById('offlineIndicator').classList.add('show');
+            // Close WebSocket to prevent reconnection attempts while offline
+            if (websocket) {
+                websocket.close();
+            }
         });
 
         function retryFetch() {
