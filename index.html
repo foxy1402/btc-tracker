@@ -448,7 +448,7 @@
         const BINANCE_WS = 'wss://stream.binance.com:9443/ws/btcusdt@ticker';
         const CHART_UPDATE_INTERVAL = 60000;
         const CHART_REBUILD_INTERVAL = 6 * 60 * 60 * 1000;
-        const FIREFOX_CHART_REFRESH = 30 * 60 * 1000;
+        const FIREFOX_CHART_REFRESH = 10 * 60 * 1000;
         const BUTTON_HIDE_DELAY = 3000;
         const MAX_DATA_POINTS = 120;
         const MAX_RECONNECT_DELAY = 30000;
@@ -687,6 +687,9 @@
                         responsive: true,
                         maintainAspectRatio: false,
                         animation: false,
+                        onResize: function () {
+                            updatePriceLabelPosition(currentPrice);
+                        },
                         interaction: {
                             intersect: false,
                             mode: 'index',
@@ -738,6 +741,37 @@
                     }
                 });
             }
+        }
+
+        // Replace canvas element entirely to clear stale Firefox canvas buffer state
+        function rebuildChartFresh() {
+            log('Full chart rebuild with fresh canvas');
+            if (chart) {
+                chart.destroy();
+                chart = null;
+            }
+            const wrapper = document.getElementById('chartWrapper');
+            const oldCanvas = document.getElementById('priceChart');
+            const newCanvas = document.createElement('canvas');
+            newCanvas.id = 'priceChart';
+            newCanvas.className = 'chart-canvas';
+            wrapper.replaceChild(newCanvas, oldCanvas);
+            fetchChartData();
+        }
+
+        // Detect canvas internal dimensions drifting from CSS dimensions
+        function checkCanvasIntegrity() {
+            if (!chart) return true;
+            const canvas = chart.canvas;
+            const dpr = window.devicePixelRatio || 1;
+            const expectedWidth = Math.round(canvas.clientWidth * dpr);
+            const expectedHeight = Math.round(canvas.clientHeight * dpr);
+            const widthOk = Math.abs(canvas.width - expectedWidth) <= 2;
+            const heightOk = Math.abs(canvas.height - expectedHeight) <= 2;
+            if (!widthOk || !heightOk) {
+                log(`Canvas integrity failed: ${canvas.width}x${canvas.height} vs expected ${expectedWidth}x${expectedHeight}`);
+            }
+            return widthOk && heightOk;
         }
 
         function startHideButtonTimer() {
@@ -923,21 +957,15 @@
         }
 
         window.addEventListener('orientationchange', function () {
-            if (chart) {
-                setTimeout(() => {
-                    chart.resize();
-                    updatePriceLabelPosition(currentPrice);
-                }, 200);
-            }
+            setTimeout(() => {
+                if (chart) updatePriceLabelPosition(currentPrice);
+            }, 300);
         });
 
         window.addEventListener('resize', function () {
             if (resizeDebounceTimer) clearTimeout(resizeDebounceTimer);
             resizeDebounceTimer = setTimeout(() => {
-                if (chart) {
-                    chart.resize();
-                    updatePriceLabelPosition(currentPrice);
-                }
+                if (chart) updatePriceLabelPosition(currentPrice);
             }, RESIZE_DEBOUNCE_DELAY);
         });
 
@@ -954,22 +982,19 @@
         fetchChartData();
         chartUpdateInterval = setInterval(fetchChartData, CHART_UPDATE_INTERVAL);
 
-        // Periodic chart rebuild to prevent data corruption
+        // Periodic full chart rebuild with fresh canvas to prevent canvas corruption
         chartRebuildInterval = setInterval(() => {
-            if (chart) {
-                log('Rebuilding chart to prevent corruption');
-                chart.destroy();
-                chart = null;
-                fetchChartData();
-            }
+            rebuildChartFresh();
         }, CHART_REBUILD_INTERVAL);
 
         // Firefox-specific handling for Android
         const isFirefoxAndroid = /Firefox.*Android/i.test(navigator.userAgent);
         if (isFirefoxAndroid) {
-            log('Firefox Android detected - enabling aggressive chart refresh');
+            log('Firefox Android detected - enabling canvas integrity watchdog');
             firefoxRefreshInterval = setInterval(() => {
-                if (chart) chart.update('none');
+                if (!checkCanvasIntegrity()) {
+                    rebuildChartFresh();
+                }
             }, FIREFOX_CHART_REFRESH);
         }
     </script>
