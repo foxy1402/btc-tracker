@@ -7,6 +7,8 @@
     <meta name="description"
         content="Real-time Bitcoin price tracker with live Binance data, 24-hour chart, and price change indicators.">
     <meta name="theme-color" content="#1a1a1a">
+    <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; connect-src https://api.binance.com https://api1.binance.com https://api2.binance.com https://api3.binance.com https://api4.binance.com https://data-api.binance.vision wss://stream.binance.com:9443 wss://stream.binance.com:443 wss://stream.binance.com wss://data-stream.binance.vision; font-src 'none'">
     <meta property="og:title" content="Bitcoin Price Tracker">
     <meta property="og:description" content="Real-time BTC/USDT price tracking with live Binance WebSocket data.">
     <meta property="og:type" content="website">
@@ -22,8 +24,6 @@
     <link rel="preconnect" href="https://api.binance.com">
     <link rel="preconnect" href="https://stream.binance.com">
     <link rel="preconnect" href="https://cdn.jsdelivr.net">
-
-    <script src="https://cdn.jsdelivr.net/npm/chart.js" defer></script>
     <style>
         :root {
             --color-bg: #1a1a1a;
@@ -159,10 +159,21 @@
             display: inline-block;
             width: 8px;
             height: 8px;
-            background-color: #00c896;
+            background-color: var(--color-success);
             border-radius: 50%;
             margin-right: 6px;
             animation: pulse 2s infinite;
+        }
+
+        .live-indicator.degraded {
+            background-color: var(--color-primary);
+            animation: pulse 1s infinite;
+        }
+
+        .live-indicator.offline {
+            background-color: var(--color-danger);
+            animation: none;
+            opacity: 0.85;
         }
 
         @keyframes pulse {
@@ -209,6 +220,12 @@
 
         .error .retry-btn:hover {
             opacity: 0.8;
+        }
+
+        .error.healing {
+            background-color: rgba(247, 147, 26, 0.1);
+            border-color: var(--color-primary);
+            color: var(--color-primary);
         }
 
         .offline-indicator {
@@ -403,7 +420,7 @@
         </div>
 
         <div class="controls">
-            <button class="btn" onclick="toggleFullscreen()">📊 Fullscreen</button>
+            <button type="button" class="btn" onclick="toggleFullscreen()">📊 Fullscreen</button>
         </div>
 
         <div id="error" class="error" style="display: none;"></div>
@@ -422,12 +439,13 @@
                 </div>
 
                 <div class="status">
-                    <p><span class="live-indicator"></span>Live • Last updated: <span id="timestamp">-</span></p>
+                    <p><span id="liveDot" class="live-indicator"></span><span id="liveLabel">Live</span> • Last updated: <span id="timestamp">-</span></p>
                 </div>
             </div>
         </div>
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3"></script>
     <script>
         // Configuration
         const DEBUG = false; // Set to true for development logging
@@ -443,19 +461,718 @@
         let priceChange24h = 0;
         let reconnectAttempts = 0;
         let resizeDebounceTimer = null;
+        let apiHostIndex = 0;
+        let wsUrlIndex = 0;
+        let chartFetchInFlight = false;
+        let chartFetchController = null;
+        let fetchGeneration = 0;
+        let healRetryTimer = null;
+        let healUiTimer = null;
+        let fetchFailStreak = 0;
+        let lastHealUiKey = '';
+        let lastClassified = null;
+        let wsReconnectTimer = null;
+        let lastTickerAt = 0;
+        let lastChartOkAt = 0;
+        let lastPriceOkAt = 0;
+        let lastCanvasRebuildAt = 0;
+        let wsConnectStartedAt = 0;
+        let wsConnectTimer = null;
+        let consecutiveWsFails = 0;
+        let healRetryDueAt = 0;
+        let healthTimer = null;
+        let healResumeTimer = null;
+        let tickerInFlight = false;
+        let intentionalWsClose = false;
+        let lastWsForceAt = 0;
+        let chartLibPromise = null;
+        let pendingChartRebuild = false;
+        let offlineTimeout;
+        const hostState = {};
 
-        const BINANCE_API = 'https://api.binance.com/api/v3';
-        const BINANCE_WS = 'wss://stream.binance.com:9443/ws/btcusdt@ticker';
+        const BINANCE_API_HOSTS = [
+            'https://api.binance.com/api/v3',
+            'https://api1.binance.com/api/v3',
+            'https://api2.binance.com/api/v3',
+            'https://api3.binance.com/api/v3',
+            'https://api4.binance.com/api/v3',
+            'https://data-api.binance.vision/api/v3'
+        ];
+        const BINANCE_WS_URLS = [
+            'wss://stream.binance.com:9443/ws/btcusdt@ticker',
+            'wss://stream.binance.com:443/ws/btcusdt@ticker',
+            'wss://stream.binance.com/ws/btcusdt@ticker',
+            'wss://data-stream.binance.vision/ws/btcusdt@ticker'
+        ];
         const CHART_UPDATE_INTERVAL = 60000;
         const CHART_REBUILD_INTERVAL = 6 * 60 * 60 * 1000;
         const FIREFOX_CHART_REFRESH = 10 * 60 * 1000;
         const BUTTON_HIDE_DELAY = 3000;
         const MAX_DATA_POINTS = 120;
+        const MAX_VALID_PRICE = 10000000;
         const MAX_RECONNECT_DELAY = 30000;
         const RESIZE_DEBOUNCE_DELAY = 150;
+        const FETCH_TIMEOUT_MS = 12000;
+        const HEAL_UI_DELAY = 1800;
+        const MAX_FAST_HEAL_ATTEMPTS = 6;
+        const MAX_HEAL_DELAY = 20000;
+        const WS_STALE_MS = 45000;
+        const WS_CONNECT_TIMEOUT_MS = 10000;
+        const HEALTH_TICK_MS = 5000;
+        const CANVAS_REBUILD_MIN_MS = 30000;
+        const PRICE_REST_FALLBACK_MS = 20000;
+        const NETWORK_ERROR_HINTS = [
+            'networkerror', 'network error', 'failed to fetch', 'load failed', 'network request failed',
+            'content-length', 'content length', 'current-length', 'exceeds the response body', 'exceeds response body',
+            'partial transfer', 'incomplete chunked', 'empty response',
+            'ns_error_net', 'ns_binding', 'ns_error_unknown_host', 'ns_error_connection', 'ns_error_net_reset',
+            'ns_error_net_interrupt', 'ns_error_net_timeout', 'ns_error_net_partial', 'ns_error_abort',
+            'err_network', 'err_connection', 'err_internet', 'err_empty_response', 'err_content_length',
+            'err_incomplete', 'err_http2', 'err_quic', 'err_ssl', 'err_cert', 'err_name_not_resolved',
+            'err_address_unreachable', 'err_timed_out', 'err_proxy', 'err_tunnel', 'err_failed',
+            'connection reset', 'connection refused', 'connection closed', 'connection lost',
+            'internet disconnected', 'name not resolved', 'failed to connect',
+            'the network connection was lost', 'network is unreachable', 'cors',
+            'failed to load', 'fetch failed', 'net::', 'ssl', 'tls', 'certificate', 'dns'
+        ];
 
         function log(...args) {
             if (DEBUG) console.log(...args);
+        }
+
+        function refreshConnectionStatus() {
+            const dot = document.getElementById('liveDot');
+            const label = document.getElementById('liveLabel');
+            if (!dot || !label) return;
+
+            let state = 'live';
+            const wsOpen = websocket && websocket.readyState === WebSocket.OPEN;
+            const wsFresh = lastTickerAt && (Date.now() - lastTickerAt < WS_STALE_MS);
+
+            if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+                state = 'offline';
+            } else if (!wsOpen || !wsFresh) {
+                state = 'healing';
+            }
+
+            dot.classList.toggle('degraded', state === 'healing');
+            dot.classList.toggle('offline', state === 'offline');
+            label.textContent = state === 'offline' ? 'Offline' : (state === 'healing' ? 'Reconnecting' : 'Live');
+        }
+
+        function getHostMeta(base) {
+            if (!hostState[base]) {
+                hostState[base] = { cooldownUntil: 0, lastOk: 0, fails: 0 };
+            }
+            return hostState[base];
+        }
+
+        function pickApiBase() {
+            const now = Date.now();
+            let best = apiHostIndex % BINANCE_API_HOSTS.length;
+            let bestScore = -Infinity;
+            let fallback = 0;
+            let fallbackCool = Infinity;
+
+            for (let i = 0; i < BINANCE_API_HOSTS.length; i++) {
+                const meta = getHostMeta(BINANCE_API_HOSTS[i]);
+                if (meta.cooldownUntil > now) {
+                    if (meta.cooldownUntil < fallbackCool) {
+                        fallbackCool = meta.cooldownUntil;
+                        fallback = i;
+                    }
+                    continue;
+                }
+                const score = (meta.lastOk || 0) - meta.fails * 5000;
+                if (score > bestScore) {
+                    bestScore = score;
+                    best = i;
+                }
+            }
+
+            if (bestScore === -Infinity) best = fallback;
+            apiHostIndex = best;
+            return BINANCE_API_HOSTS[best];
+        }
+
+        function punishApiHost(ms, failedBase) {
+            const base = failedBase || BINANCE_API_HOSTS[apiHostIndex % BINANCE_API_HOSTS.length];
+            const meta = getHostMeta(base);
+            meta.fails += 1;
+            meta.cooldownUntil = Date.now() + (ms || 15000);
+            apiHostIndex = (apiHostIndex + 1) % BINANCE_API_HOSTS.length;
+            log('Rotated API host to', BINANCE_API_HOSTS[apiHostIndex]);
+        }
+
+        function rewardApiHost(base) {
+            const meta = getHostMeta(base);
+            meta.lastOk = Date.now();
+            meta.fails = 0;
+            meta.cooldownUntil = 0;
+            const idx = BINANCE_API_HOSTS.indexOf(base);
+            if (idx >= 0) apiHostIndex = idx;
+        }
+
+        function rotateWsUrl() {
+            wsUrlIndex = (wsUrlIndex + 1) % BINANCE_WS_URLS.length;
+            log('Rotated WebSocket URL to', BINANCE_WS_URLS[wsUrlIndex]);
+        }
+
+        function collectErrorText(error) {
+            const parts = [];
+            let cur = error;
+            let depth = 0;
+            while (cur && depth < 5) {
+                if (typeof cur === 'string') {
+                    parts.push(cur);
+                    break;
+                }
+                if (cur.name) parts.push(String(cur.name));
+                if (cur.message) parts.push(String(cur.message));
+                if (cur.code != null) parts.push(String(cur.code));
+                if (cur.status != null) parts.push(String(cur.status));
+                if (cur.binanceCode != null) parts.push(String(cur.binanceCode));
+                cur = cur.cause;
+                depth++;
+            }
+            return parts.join(' ').toLowerCase();
+        }
+
+        function looksLikeNetwork(text) {
+            for (let i = 0; i < NETWORK_ERROR_HINTS.length; i++) {
+                if (text.indexOf(NETWORK_ERROR_HINTS[i]) !== -1) return true;
+            }
+            return false;
+        }
+
+        function classifyFetchError(error, httpStatus) {
+            const status = httpStatus || (error && error.status) || 0;
+            const name = error && error.name ? error.name : '';
+            const lower = collectErrorText(error);
+            const binanceCode = error && error.binanceCode;
+
+            if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+                return { kind: 'offline', retryable: true, delay: 2000, userMessage: 'No internet connection — waiting to reconnect…' };
+            }
+            if (status === 429 || status === 418 || binanceCode === -1003 || binanceCode === -1015) {
+                return { kind: 'rate_limit', retryable: true, delay: error && error.retryAfterMs ? error.retryAfterMs : 12000, retryAfterMs: error && error.retryAfterMs || 0, userMessage: 'Exchange is busy — retrying shortly…' };
+            }
+            if (status === 403 || status === 451 || status === 401) {
+                return { kind: 'blocked', retryable: true, delay: 2500, userMessage: 'API blocked this network — switching endpoint…' };
+            }
+            if (status === 408 || status === 425 || status === 499 || status >= 500) {
+                return { kind: 'server', retryable: true, delay: 3000, userMessage: 'Exchange is temporarily unavailable — retrying…' };
+            }
+            if (
+                name === 'AbortError' ||
+                lower.indexOf('timeout') !== -1 ||
+                lower.indexOf('timed out') !== -1 ||
+                lower.indexOf('aborted') !== -1
+            ) {
+                return { kind: 'timeout', retryable: true, delay: 1500, userMessage: 'Request timed out — retrying…' };
+            }
+            if (
+                lower.indexOf('chart') !== -1 ||
+                lower.indexOf('canvas') !== -1 ||
+                lower.indexOf('context lost') !== -1 ||
+                lower.indexOf('contextlost') !== -1
+            ) {
+                return { kind: 'render', retryable: true, delay: 2000, userMessage: 'Chart display glitch — rebuilding…' };
+            }
+            if (
+                name === 'NetworkError' ||
+                name === 'SecurityError' ||
+                looksLikeNetwork(lower) ||
+                (name === 'TypeError' && lower.indexOf('cannot read') === -1 && lower.indexOf('undefined') === -1)
+            ) {
+                return { kind: 'network', retryable: true, delay: 1200, userMessage: 'Network interrupted — reconnecting…' };
+            }
+            if (lower.indexOf('json') !== -1 || lower.indexOf('unexpected token') !== -1 || lower.indexOf('captive') !== -1) {
+                return { kind: 'payload', retryable: true, delay: 2000, userMessage: 'Received a broken response — retrying…' };
+            }
+            if (status >= 400) {
+                return { kind: 'http', retryable: true, delay: 4000, userMessage: 'Could not load chart data — retrying…' };
+            }
+            return { kind: 'unknown', retryable: true, delay: 2500, userMessage: 'Temporary problem — retrying…' };
+        }
+
+        function healDelay(classified) {
+            const extra = classified && classified.retryAfterMs ? classified.retryAfterMs : 0;
+            const streak = Math.max(0, fetchFailStreak - 1);
+            const exp = Math.min((classified.delay || 2000) * Math.pow(1.7, streak), MAX_HEAL_DELAY);
+            return Math.max(extra, Math.round(exp * (0.85 + Math.random() * 0.3)));
+        }
+
+        function clearHealTimers() {
+            if (healRetryTimer) {
+                clearTimeout(healRetryTimer);
+                healRetryTimer = null;
+            }
+            healRetryDueAt = 0;
+            if (healUiTimer) {
+                clearTimeout(healUiTimer);
+                healUiTimer = null;
+            }
+        }
+
+        function hideErrorBanner() {
+            lastHealUiKey = '';
+            const errorEl = document.getElementById('error');
+            errorEl.classList.remove('healing');
+            errorEl.style.display = 'none';
+            errorEl.textContent = '';
+        }
+
+        function renderHealUi(classified, showRetry) {
+            const kind = classified ? classified.kind : 'unknown';
+            const key = kind + '|' + (showRetry ? 'retry' : 'heal');
+            if (key === lastHealUiKey) return;
+            lastHealUiKey = key;
+
+            const errorEl = document.getElementById('error');
+            errorEl.style.display = 'block';
+            errorEl.classList.toggle('healing', !showRetry);
+            errorEl.textContent = '';
+
+            const msgDiv = document.createElement('div');
+            msgDiv.textContent = showRetry
+                ? '⚠ Connection is unstable. Retrying automatically…'
+                : '⟳ ' + (classified && classified.userMessage ? classified.userMessage : 'Reconnecting…');
+            errorEl.appendChild(msgDiv);
+
+            if (showRetry) {
+                const retryBtn = document.createElement('button');
+                retryBtn.type = 'button';
+                retryBtn.className = 'retry-btn';
+                retryBtn.textContent = 'Retry now';
+                retryBtn.onclick = retryFetch;
+                errorEl.appendChild(retryBtn);
+            }
+        }
+
+        function noteFetchFailure(classified) {
+            lastClassified = classified;
+            fetchFailStreak++;
+
+            if (classified.kind === 'render') {
+                const now = Date.now();
+                if (now - lastCanvasRebuildAt > CANVAS_REBUILD_MIN_MS) {
+                    lastCanvasRebuildAt = now;
+                    try { rebuildChartCanvasOnly(); } catch (e) { }
+                }
+            }
+
+            const hasChart = !!chart;
+            if (!hasChart) {
+                document.getElementById('loading').style.display = 'block';
+                document.getElementById('loading').textContent = classified.userMessage;
+            } else {
+                document.getElementById('loading').style.display = 'none';
+            }
+
+            const showRetry = fetchFailStreak >= MAX_FAST_HEAL_ATTEMPTS;
+            if (!healUiTimer && !lastHealUiKey) {
+                healUiTimer = setTimeout(function () {
+                    healUiTimer = null;
+                    if (fetchFailStreak > 0 && lastClassified) {
+                        const loaded = document.getElementById('content').style.display === 'block';
+                        if (loaded || fetchFailStreak >= 2) {
+                            document.getElementById('loading').style.display = 'none';
+                            renderHealUi(lastClassified, fetchFailStreak >= MAX_FAST_HEAL_ATTEMPTS);
+                        }
+                    }
+                }, HEAL_UI_DELAY);
+            } else if (lastHealUiKey) {
+                renderHealUi(classified, showRetry);
+            }
+
+            scheduleHealRetry(classified);
+            refreshConnectionStatus();
+        }
+
+        function scheduleHealRetry(classified) {
+            if (healRetryTimer || document.hidden) return;
+            if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+            const delay = healDelay(classified);
+            log('Self-heal retry in ' + (delay / 1000).toFixed(1) + 's (streak ' + fetchFailStreak + ')');
+            healRetryDueAt = Date.now() + delay;
+            healRetryTimer = setTimeout(function () {
+                healRetryTimer = null;
+                healRetryDueAt = 0;
+                fetchChartData();
+            }, delay);
+        }
+
+        function parseRetryAfterMs(response) {
+            if (!response || !response.headers || !response.headers.get) return 0;
+            const raw = response.headers.get('Retry-After');
+            if (!raw) return 0;
+            const seconds = parseInt(raw, 10);
+            if (!isNaN(seconds) && seconds >= 0) return Math.min(seconds * 1000, 60000);
+            const when = Date.parse(raw);
+            if (!isNaN(when)) return Math.min(Math.max(0, when - Date.now()), 60000);
+            return 0;
+        }
+
+        function loadChartScript(src, fallbackAttr) {
+            return new Promise(function (resolve, reject) {
+                const script = document.createElement('script');
+                script.src = src;
+                if (fallbackAttr) script.setAttribute('data-chart-fallback', '1');
+                script.onload = function () {
+                    if (typeof Chart !== 'undefined') resolve();
+                    else reject(new Error('Chart library failed to load'));
+                };
+                script.onerror = function () {
+                    reject(new Error('Chart library failed to load'));
+                };
+                document.head.appendChild(script);
+            });
+        }
+
+        function ensureChartLib() {
+            if (typeof Chart !== 'undefined') {
+                return Promise.resolve();
+            }
+            if (chartLibPromise) return chartLibPromise;
+
+            chartLibPromise = loadChartScript('https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.3/chart.umd.min.js')
+                .catch(function () {
+                    return loadChartScript('chart.umd.min.js', true);
+                })
+                .then(function () {
+                    if (typeof Chart === 'undefined') {
+                        throw new Error('Chart library failed to load');
+                    }
+                })
+                .catch(function (error) {
+                    chartLibPromise = null;
+                    throw error;
+                });
+
+            return chartLibPromise;
+        }
+
+        async function fetchJson(url, signal) {
+            const timeoutController = new AbortController();
+            const onParentAbort = function () { timeoutController.abort(); };
+            if (signal) {
+                if (signal.aborted) timeoutController.abort();
+                else signal.addEventListener('abort', onParentAbort, { once: true });
+            }
+            const timeout = setTimeout(function () { timeoutController.abort(); }, FETCH_TIMEOUT_MS);
+
+            try {
+                const response = await fetch(url, {
+                    signal: timeoutController.signal,
+                    cache: 'no-store',
+                    credentials: 'omit',
+                    mode: 'cors',
+                    referrerPolicy: 'no-referrer',
+                    headers: { 'Accept': 'application/json' }
+                });
+
+                const retryAfterMs = parseRetryAfterMs(response);
+                const text = await response.text();
+
+                if (!response.ok) {
+                    const err = new Error('HTTP ' + response.status);
+                    err.status = response.status;
+                    err.retryAfterMs = retryAfterMs;
+                    if (text) {
+                        try {
+                            const body = JSON.parse(text);
+                            if (body && body.code != null) err.binanceCode = body.code;
+                            if (body && body.msg) err.message = 'HTTP ' + response.status + ' ' + body.msg;
+                        } catch (e) { }
+                    }
+                    throw err;
+                }
+
+                if (!text) {
+                    throw new Error('Empty response body');
+                }
+                const trimmed = text.trim();
+                if (trimmed.charAt(0) === '<') {
+                    throw new Error('Captive portal or HTML response');
+                }
+
+                let data;
+                try {
+                    data = JSON.parse(text);
+                } catch (parseError) {
+                    throw new Error('Invalid JSON response');
+                }
+
+                if (data && !Array.isArray(data) && (data.code < 0 || (data.msg && data.lastPrice == null && data[0] == null))) {
+                    const err = new Error(data.msg || ('Binance error ' + data.code));
+                    err.binanceCode = data.code;
+                    throw err;
+                }
+
+                return data;
+            } catch (error) {
+                if (error && error.name === 'AbortError') {
+                    if (signal && signal.aborted) throw error;
+                    const timeoutErr = new Error('Request timed out');
+                    timeoutErr.name = 'AbortError';
+                    throw timeoutErr;
+                }
+                throw error;
+            } finally {
+                clearTimeout(timeout);
+                if (signal) signal.removeEventListener('abort', onParentAbort);
+            }
+        }
+
+        async function fetchJsonResilient(url, signal) {
+            try {
+                return await fetchJson(url, signal);
+            } catch (error) {
+                const classified = classifyFetchError(error);
+                if (classified.kind === 'network' || classified.kind === 'timeout' || classified.kind === 'payload' || classified.kind === 'server') {
+                    if (signal && signal.aborted) throw error;
+                    log('Quick retry after', classified.kind);
+                    return await fetchJson(url, signal);
+                }
+                throw error;
+            }
+        }
+
+        async function fetchKlinesFromHost(base, signal) {
+            const now = Date.now();
+            const twentyFourHoursAgo = now - (24 * 60 * 60 * 1000);
+            const firstBatchStart = twentyFourHoursAgo;
+            const firstBatchEnd = twentyFourHoursAgo + (1000 * 60 * 1000);
+
+            let batch1;
+            try {
+                batch1 = await fetchJsonResilient(
+                    base + '/klines?symbol=BTCUSDT&interval=1m&startTime=' + firstBatchStart + '&endTime=' + firstBatchEnd + '&limit=1000',
+                    signal
+                );
+            } catch (error) {
+                log('Ranged klines failed, degrading to latest window');
+                batch1 = await fetchJsonResilient(
+                    base + '/klines?symbol=BTCUSDT&interval=1m&limit=1000',
+                    signal
+                );
+            }
+
+            if (!Array.isArray(batch1) || batch1.length === 0) {
+                batch1 = await fetchJsonResilient(
+                    base + '/klines?symbol=BTCUSDT&interval=1m&limit=1000',
+                    signal
+                );
+            }
+            if (!Array.isArray(batch1) || batch1.length === 0) {
+                throw new Error('Empty kline payload');
+            }
+
+            let batch2 = [];
+            try {
+                const data = await fetchJsonResilient(
+                    base + '/klines?symbol=BTCUSDT&interval=1m&startTime=' + firstBatchEnd + '&limit=1000',
+                    signal
+                );
+                if (Array.isArray(data)) batch2 = data;
+            } catch (error) {
+                log('Batch 2 failed, using partial 24h window');
+            }
+
+            return batch1.concat(batch2).slice(-1440);
+        }
+
+        async function fetchKlines24h(signal) {
+            let lastError = null;
+            const tries = Math.min(2, BINANCE_API_HOSTS.length);
+            for (let i = 0; i < tries; i++) {
+                const base = pickApiBase();
+                try {
+                    const data = await fetchKlinesFromHost(base, signal);
+                    rewardApiHost(base);
+                    return data;
+                } catch (error) {
+                    lastError = error;
+                    if (signal && signal.aborted) throw error;
+                    const classified = classifyFetchError(error);
+                    punishApiHost(classified.kind === 'rate_limit' ? 60000 : 12000, base);
+                }
+            }
+            throw lastError;
+        }
+
+        async function fetchTickerFallback(signal) {
+            const base = pickApiBase();
+            const data = await fetchJson(base + '/ticker/24hr?symbol=BTCUSDT', signal);
+            const price = parseFloat(data.lastPrice || data.c);
+            const change = parseFloat(data.priceChangePercent || data.P);
+            if (!isNaN(price) && !isNaN(change) && isFinite(price) && isFinite(change) && price > 0 && price < MAX_VALID_PRICE) {
+                rewardApiHost(base);
+                updatePriceDisplay(price, change);
+                return true;
+            }
+            throw new Error('Invalid ticker payload');
+        }
+
+        function fetchTickerQuiet() {
+            if (tickerInFlight || document.hidden) return;
+            if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+            tickerInFlight = true;
+            const controller = new AbortController();
+            const timer = setTimeout(function () { controller.abort(); }, 8000);
+            fetchTickerFallback(controller.signal).catch(function (error) {
+                log('Ticker fallback failed', error && error.message);
+            }).finally(function () {
+                clearTimeout(timer);
+                tickerInFlight = false;
+            });
+        }
+
+        function closeWebSocket(intentional) {
+            if (wsReconnectTimer) {
+                clearTimeout(wsReconnectTimer);
+                wsReconnectTimer = null;
+            }
+            if (wsConnectTimer) {
+                clearTimeout(wsConnectTimer);
+                wsConnectTimer = null;
+            }
+            intentionalWsClose = !!intentional;
+            if (websocket) {
+                try { websocket.close(); } catch (e) { }
+                websocket = null;
+            }
+        }
+
+        function scheduleWsReconnect() {
+            if (wsReconnectTimer || document.hidden) return;
+            if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+            const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), MAX_RECONNECT_DELAY);
+            reconnectAttempts++;
+            log('Reconnecting WebSocket in ' + (delay / 1000) + 's... (attempt ' + reconnectAttempts + ')');
+            wsReconnectTimer = setTimeout(function () {
+                wsReconnectTimer = null;
+                connectWebSocket();
+            }, delay);
+        }
+
+        function requestSelfHeal(reason, force) {
+            log('Self-heal trigger:', reason);
+            if (document.hidden) return;
+            if (healResumeTimer) {
+                if (!force) return;
+                clearTimeout(healResumeTimer);
+                healResumeTimer = null;
+            }
+            healResumeTimer = setTimeout(function () {
+                healResumeTimer = null;
+                if (document.hidden) return;
+                const wsOpen = websocket && websocket.readyState === WebSocket.OPEN;
+                const wsFresh = lastTickerAt && (Date.now() - lastTickerAt < WS_STALE_MS);
+                if (!force && wsOpen && wsFresh && chart && fetchFailStreak === 0) return;
+                connectWebSocket();
+                fetchChartData({ force: !!force });
+                if (!wsOpen || !wsFresh) fetchTickerQuiet();
+            }, 350);
+        }
+
+        function healthTick() {
+            if (document.hidden) return;
+            const now = Date.now();
+            const wsState = websocket ? websocket.readyState : WebSocket.CLOSED;
+
+            if (healRetryTimer && healRetryDueAt && now > healRetryDueAt + 8000) {
+                log('Heal timer overdue — supervisor takeover');
+                clearTimeout(healRetryTimer);
+                healRetryTimer = null;
+                healRetryDueAt = 0;
+                if (!chartFetchInFlight) {
+                    fetchChartData();
+                }
+            }
+
+            if (wsState === WebSocket.CONNECTING && wsConnectStartedAt && now - wsConnectStartedAt > WS_CONNECT_TIMEOUT_MS) {
+                log('WebSocket handshake timeout');
+                consecutiveWsFails++;
+                rotateWsUrl();
+                closeWebSocket(false);
+                scheduleWsReconnect();
+                fetchTickerQuiet();
+            } else if (wsState === WebSocket.CLOSING) {
+                // Wait for onclose to reconnect; do not open a second socket.
+            } else if (wsState !== WebSocket.OPEN && wsState !== WebSocket.CONNECTING && !wsReconnectTimer) {
+                connectWebSocket();
+            } else if (wsState === WebSocket.OPEN && lastTickerAt && now - lastTickerAt > WS_STALE_MS) {
+                if (now - lastWsForceAt >= 10000) {
+                    log('WebSocket stale — supervisor reconnect');
+                    lastWsForceAt = now;
+                    consecutiveWsFails++;
+                    rotateWsUrl();
+                    if (websocket) {
+                        try { websocket.close(); } catch (e) { }
+                    }
+                    fetchTickerQuiet();
+                }
+            }
+
+            if (!chartFetchInFlight && !healRetryTimer) {
+                const missingChart = !chart;
+                const chartStale = lastChartOkAt && now - lastChartOkAt > CHART_UPDATE_INTERVAL * 2.5;
+                if ((missingChart && fetchFailStreak > 0) || chartStale) {
+                    fetchChartData();
+                }
+            }
+
+            if (chart && now - lastCanvasRebuildAt > CANVAS_REBUILD_MIN_MS && !checkCanvasIntegrity()) {
+                lastCanvasRebuildAt = now;
+                rebuildChartFresh();
+            }
+
+            if (wsState !== WebSocket.OPEN) {
+                const priceEl = document.getElementById('priceValue');
+                const priceMissing = !priceEl || priceEl.textContent === '-' || priceEl.textContent === '';
+                if (priceMissing || (lastPriceOkAt && now - lastPriceOkAt > PRICE_REST_FALLBACK_MS)) {
+                    fetchTickerQuiet();
+                }
+            }
+
+            refreshConnectionStatus();
+        }
+
+        function startHealthSupervisor() {
+            if (healthTimer) return;
+            healthTimer = setInterval(healthTick, HEALTH_TICK_MS);
+        }
+
+        function rebuildChartCanvasOnly() {
+            if (chart) {
+                try { chart.destroy(); } catch (e) { }
+                chart = null;
+            }
+            const wrapper = document.getElementById('chartWrapper');
+            const oldCanvas = document.getElementById('priceChart');
+            if (!wrapper || !oldCanvas) return;
+            const newCanvas = document.createElement('canvas');
+            newCanvas.id = 'priceChart';
+            newCanvas.className = 'chart-canvas';
+            wrapper.replaceChild(newCanvas, oldCanvas);
+            bindCanvasHeal(newCanvas);
+        }
+
+        function bindCanvasHeal(canvas) {
+            if (!canvas || canvas.dataset.healBound) return;
+            canvas.dataset.healBound = '1';
+            const onLost = function (event) {
+                if (event && event.preventDefault) event.preventDefault();
+                log('Canvas context lost — rebuilding');
+                const now = Date.now();
+                if (now - lastCanvasRebuildAt < CANVAS_REBUILD_MIN_MS) return;
+                lastCanvasRebuildAt = now;
+                rebuildChartFresh();
+            };
+            canvas.addEventListener('contextlost', onLost);
+            canvas.addEventListener('webglcontextlost', onLost);
         }
 
         function formatCurrency(value) {
@@ -470,6 +1187,7 @@
 
             const priceLabel = document.getElementById('priceLabel');
             const chartWrapper = document.getElementById('chartWrapper');
+            if (!priceLabel || !chartWrapper || !chart.canvas) return;
 
             const yPos = chart.scales.y.getPixelForValue(price);
             const wrapperRect = chartWrapper.getBoundingClientRect();
@@ -482,6 +1200,7 @@
         function updatePriceDisplay(price, change24h) {
             currentPrice = price;
             priceChange24h = change24h;
+            lastPriceOkAt = Date.now();
 
             const isPositive = change24h >= 0;
             const chartColor = isPositive ? '#00c896' : '#ff4444';
@@ -499,27 +1218,74 @@
         }
 
         function connectWebSocket() {
-            if (websocket && (websocket.readyState === WebSocket.CONNECTING || websocket.readyState === WebSocket.OPEN)) {
+            if (document.hidden || !navigator.onLine) return;
+            if (websocket && (
+                websocket.readyState === WebSocket.CONNECTING ||
+                websocket.readyState === WebSocket.OPEN ||
+                websocket.readyState === WebSocket.CLOSING
+            )) {
                 return;
             }
 
-            websocket = new WebSocket(BINANCE_WS);
+            if (wsReconnectTimer) {
+                clearTimeout(wsReconnectTimer);
+                wsReconnectTimer = null;
+            }
+
+            if (wsConnectTimer) {
+                clearTimeout(wsConnectTimer);
+                wsConnectTimer = null;
+            }
+
+            intentionalWsClose = false;
+            const url = BINANCE_WS_URLS[wsUrlIndex % BINANCE_WS_URLS.length];
+            log('Connecting WebSocket', url);
+            wsConnectStartedAt = Date.now();
+
+            try {
+                websocket = new WebSocket(url);
+            } catch (error) {
+                consecutiveWsFails++;
+                rotateWsUrl();
+                scheduleWsReconnect();
+                fetchTickerQuiet();
+                refreshConnectionStatus();
+                return;
+            }
+
+            wsConnectTimer = setTimeout(function () {
+                wsConnectTimer = null;
+                if (websocket && websocket.readyState === WebSocket.CONNECTING) {
+                    log('WebSocket connect timeout');
+                    consecutiveWsFails++;
+                    rotateWsUrl();
+                    try { websocket.close(); } catch (e) { }
+                }
+            }, WS_CONNECT_TIMEOUT_MS);
 
             websocket.onopen = function () {
                 log('WebSocket connected');
+                if (wsConnectTimer) {
+                    clearTimeout(wsConnectTimer);
+                    wsConnectTimer = null;
+                }
                 reconnectAttempts = 0;
-                // Hide offline indicator when WebSocket successfully connects
+                consecutiveWsFails = 0;
+                lastTickerAt = Date.now();
+                lastWsForceAt = 0;
                 clearTimeout(offlineTimeout);
                 document.getElementById('offlineIndicator').classList.remove('show');
+                refreshConnectionStatus();
             };
 
             websocket.onmessage = function (event) {
                 try {
+                    lastTickerAt = Date.now();
                     const data = JSON.parse(event.data);
                     const price = parseFloat(data.c);
                     const change24h = parseFloat(data.P);
 
-                    if (!isNaN(price) && !isNaN(change24h) && isFinite(price) && isFinite(change24h) && price > 0 && price < 1000000) {
+                    if (!isNaN(price) && !isNaN(change24h) && isFinite(price) && isFinite(change24h) && price > 0 && price < MAX_VALID_PRICE) {
                         updatePriceDisplay(price, change24h);
                     }
                 } catch (error) {
@@ -532,87 +1298,100 @@
             };
 
             websocket.onclose = function () {
-                log('WebSocket closed, reconnecting...');
-
-                // Don't reconnect if offline
-                if (!navigator.onLine) {
-                    log('Offline - skipping WebSocket reconnect');
+                const isCurrent = websocket === this;
+                if (isCurrent) websocket = null;
+                if (!isCurrent) return;
+                if (wsConnectTimer) {
+                    clearTimeout(wsConnectTimer);
+                    wsConnectTimer = null;
+                }
+                if (intentionalWsClose || document.hidden || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
+                    log('WebSocket closed (paused)');
                     return;
                 }
-
-                const delay = Math.min(5000 * Math.pow(2, reconnectAttempts), MAX_RECONNECT_DELAY);
-                reconnectAttempts++;
-
-                log(`Reconnecting in ${delay / 1000}s... (attempt ${reconnectAttempts})`);
-                setTimeout(connectWebSocket, delay);
+                log('WebSocket closed, reconnecting...');
+                consecutiveWsFails++;
+                if (consecutiveWsFails >= 2) rotateWsUrl();
+                scheduleWsReconnect();
+                fetchTickerQuiet();
+                refreshConnectionStatus();
             };
         }
 
-        async function fetchChartData() {
+        function abortChartFetch() {
+            if (!chartFetchController && !chartFetchInFlight) return;
+            fetchGeneration++;
+            if (chartFetchController) {
+                try { chartFetchController.abort(); } catch (e) { }
+                chartFetchController = null;
+            }
+            chartFetchInFlight = false;
+        }
+
+        async function fetchChartData(options) {
+            const force = options && options.force;
+            if (document.hidden) return;
+            if (!navigator.onLine) return;
+            if (chartFetchInFlight && !force) return;
+            if (!force && healRetryTimer) return;
+
+            if (force && chartFetchController) {
+                try { chartFetchController.abort(); } catch (e) { }
+            }
+
+            const gen = ++fetchGeneration;
+            chartFetchInFlight = true;
+            chartFetchController = new AbortController();
+            const signal = chartFetchController.signal;
+
             try {
-                const now = Date.now();
-                const twentyFourHoursAgo = now - (24 * 60 * 60 * 1000);
-
-                // Binance limit is 1000 candles per request
-                // So we need 2 requests: first 1000 candles + remaining 440 candles
-
-                // First batch: 1000 candles starting from 24 hours ago
-                const firstBatchStart = twentyFourHoursAgo;
-                const firstBatchEnd = twentyFourHoursAgo + (1000 * 60 * 1000); // 1000 minutes later
-
-                const response1 = await fetch(
-                    `${BINANCE_API}/klines?symbol=BTCUSDT&interval=1m&startTime=${firstBatchStart}&endTime=${firstBatchEnd}&limit=1000`
-                );
-
-                if (!response1.ok) {
-                    throw new Error(`HTTP ${response1.status}: Failed to fetch chart data (batch 1)`);
-                }
-
-                const batch1 = await response1.json();
-
-                // Second batch: remaining 440 candles (or use limit=1000 to get up to current time)
-                const response2 = await fetch(
-                    `${BINANCE_API}/klines?symbol=BTCUSDT&interval=1m&startTime=${firstBatchEnd}&limit=1000`
-                );
-
-                if (!response2.ok) {
-                    throw new Error(`HTTP ${response2.status}: Failed to fetch chart data (batch 2)`);
-                }
-
-                const batch2 = await response2.json();
-
-                // Combine both batches
-                const allKlines = [...batch1, ...batch2];
-
-                // Take exactly the last 1440 candles (24 hours)
-                const klinesData = allKlines.slice(-1440);
+                await ensureChartLib();
+                const klinesData = await fetchKlines24h(signal);
+                if (gen !== fetchGeneration) return;
 
                 updateChart(klinesData);
+                lastChartOkAt = Date.now();
 
+                fetchFailStreak = 0;
+                lastClassified = null;
+                clearHealTimers();
+                hideErrorBanner();
+                document.getElementById('loading').textContent = 'Loading price data...';
                 document.getElementById('loading').style.display = 'none';
-                document.getElementById('error').style.display = 'none';
                 document.getElementById('content').style.display = 'block';
 
+                fetchTickerFallback(signal).catch(function () { });
+                refreshConnectionStatus();
             } catch (error) {
-                if (DEBUG) console.error('Error:', error);
-                document.getElementById('loading').style.display = 'none';
-                const errorEl = document.getElementById('error');
-                errorEl.style.display = 'block';
-                // Safe DOM manipulation to prevent XSS
-                errorEl.textContent = '';
-                const msgDiv = document.createElement('div');
-                msgDiv.textContent = '⚠ ' + error.message;
-                const retryBtn = document.createElement('button');
-                retryBtn.className = 'retry-btn';
-                retryBtn.textContent = 'Retry';
-                retryBtn.onclick = retryFetch;
-                errorEl.appendChild(msgDiv);
-                errorEl.appendChild(retryBtn);
+                if (gen !== fetchGeneration) return;
+                if (document.hidden) return;
+                if (error && error.name === 'AbortError') return;
+                if (DEBUG) console.error('Chart fetch failed:', error);
+                noteFetchFailure(classifyFetchError(error));
+            } finally {
+                if (gen === fetchGeneration) {
+                    chartFetchInFlight = false;
+                    chartFetchController = null;
+                }
             }
         }
 
         function updateChart(klinesData) {
-            const ctx = document.getElementById('priceChart').getContext('2d');
+            if (typeof Chart === 'undefined') {
+                throw new Error('Chart library failed to load');
+            }
+            if (!klinesData || !klinesData.length) {
+                throw new Error('Empty kline payload');
+            }
+
+            const canvas = document.getElementById('priceChart');
+            if (!canvas) {
+                throw new Error('Chart canvas missing');
+            }
+            const ctx = canvas.getContext('2d');
+            if (!ctx) {
+                throw new Error('Canvas context lost');
+            }
 
             const firstTime = new Date(klinesData[0][0]);
             const lastTime = new Date(klinesData[klinesData.length - 1][0]);
@@ -633,22 +1412,22 @@
                 sampledData.push(lastCandle);
             }
 
-            const labels = sampledData.map(kline => {
-                const date = new Date(kline[0]);
-                return date.getHours() + ':' + String(date.getMinutes()).padStart(2, '0');
-            });
-
-            const prices = sampledData.map(kline => parseFloat(kline[4]))
-                .filter(price => {
-                    return !isNaN(price) && 
-                           isFinite(price) && 
-                           price > 0 && 
-                           price < 1000000;
+            const sampledPoints = [];
+            for (let i = 0; i < sampledData.length; i++) {
+                const price = parseFloat(sampledData[i][4]);
+                if (isNaN(price) || !isFinite(price) || price <= 0 || price >= MAX_VALID_PRICE) continue;
+                const date = new Date(sampledData[i][0]);
+                sampledPoints.push({
+                    label: date.getHours() + ':' + String(date.getMinutes()).padStart(2, '0'),
+                    price: price
                 });
+            }
+
+            const labels = sampledPoints.map(function (point) { return point.label; });
+            const prices = sampledPoints.map(function (point) { return point.price; });
 
             if (prices.length === 0) {
-                console.error('No valid price data');
-                return;
+                throw new Error('No valid price data');
             }
 
             const isPositive = priceChange24h >= 0;
@@ -745,6 +1524,11 @@
 
         // Replace canvas element entirely to clear stale Firefox canvas buffer state
         function rebuildChartFresh() {
+            if (document.hidden) {
+                pendingChartRebuild = true;
+                return;
+            }
+            pendingChartRebuild = false;
             log('Full chart rebuild with fresh canvas');
             if (chart) {
                 chart.destroy();
@@ -752,11 +1536,13 @@
             }
             const wrapper = document.getElementById('chartWrapper');
             const oldCanvas = document.getElementById('priceChart');
+            if (!wrapper || !oldCanvas) return;
             const newCanvas = document.createElement('canvas');
             newCanvas.id = 'priceChart';
             newCanvas.className = 'chart-canvas';
             wrapper.replaceChild(newCanvas, oldCanvas);
-            fetchChartData();
+            bindCanvasHeal(newCanvas);
+            fetchChartData({ force: true });
         }
 
         // Detect canvas internal dimensions drifting from CSS dimensions
@@ -820,6 +1606,7 @@
                 document.querySelector('.status').style.display = 'none';
 
                 const exitBtn = document.createElement('button');
+                exitBtn.type = 'button';
                 exitBtn.className = 'exit-fullscreen';
                 exitBtn.textContent = '✕ Exit';
                 exitBtn.onclick = toggleFullscreen;
@@ -892,48 +1679,98 @@
             }
         });
 
+        window.addEventListener('pageshow', function (event) {
+            if (!event.persisted) return;
+            log('Page restored from cache — self-heal resume');
+            reconnectAttempts = 0;
+            if (pendingChartRebuild) rebuildChartFresh();
+            requestSelfHeal('pageshow', true);
+            if (!chartUpdateInterval) {
+                chartUpdateInterval = setInterval(fetchChartData, CHART_UPDATE_INTERVAL);
+            }
+        });
+
         document.addEventListener('visibilitychange', function () {
             if (document.hidden) {
                 log('Page hidden - pausing updates');
-                if (websocket) websocket.close();
+                abortChartFetch();
+                clearHealTimers();
+                closeWebSocket(true);
                 if (chartUpdateInterval) {
                     clearInterval(chartUpdateInterval);
                     chartUpdateInterval = null;
                 }
             } else {
                 log('Page visible - resuming updates');
-                // Hide error message when page becomes visible
-                document.getElementById('error').style.display = 'none';
+                hideErrorBanner();
                 if (document.getElementById('content').style.display === 'none') {
                     document.getElementById('loading').style.display = 'block';
+                    document.getElementById('loading').textContent = 'Loading price data...';
                 }
-                connectWebSocket();
-                fetchChartData();
+                reconnectAttempts = 0;
+                if (pendingChartRebuild) {
+                    rebuildChartFresh();
+                }
+                requestSelfHeal('visible', true);
                 if (!chartUpdateInterval) {
                     chartUpdateInterval = setInterval(fetchChartData, CHART_UPDATE_INTERVAL);
                 }
             }
         });
 
-        let offlineTimeout;
-        
+        document.addEventListener('freeze', function () {
+            log('Page freeze');
+            abortChartFetch();
+            clearHealTimers();
+            closeWebSocket(true);
+        });
+
+        document.addEventListener('resume', function () {
+            log('Page resume');
+            if (pendingChartRebuild) rebuildChartFresh();
+            requestSelfHeal('resume', true);
+        });
+
+        window.addEventListener('pagehide', function () {
+            abortChartFetch();
+            clearHealTimers();
+            closeWebSocket(true);
+        });
+
+        window.addEventListener('focus', function () {
+            requestSelfHeal('focus', false);
+        });
+
+        window.addEventListener('unhandledrejection', function (event) {
+            const classified = classifyFetchError(event && event.reason);
+            if (!classified.retryable) return;
+            if (classified.kind === 'unknown' || classified.kind === 'render') return;
+            log('Unhandled rejection — self-heal', classified.kind);
+            requestSelfHeal('unhandledrejection', false);
+        });
+
+        if (navigator.connection && navigator.connection.addEventListener) {
+            navigator.connection.addEventListener('change', function () {
+                requestSelfHeal('connection-change', false);
+            });
+        }
+
         window.addEventListener('online', function () {
             log('Internet connection restored!');
-            // Auto-hide offline indicator after 3 seconds to handle VPN reconnection
             clearTimeout(offlineTimeout);
             offlineTimeout = setTimeout(function() {
                 document.getElementById('offlineIndicator').classList.remove('show');
             }, 3000);
-            // Hide error message and show loading while reconnecting
-            document.getElementById('error').style.display = 'none';
+            hideErrorBanner();
             if (document.getElementById('content').style.display === 'none') {
                 document.getElementById('loading').style.display = 'block';
+                document.getElementById('loading').textContent = 'Loading price data...';
             }
-            // Reset reconnect attempts when connection is restored
+            fetchFailStreak = 0;
             reconnectAttempts = 0;
-            connectWebSocket();
-            fetchChartData();
-            // Restart chart update interval if stopped
+            clearHealTimers();
+            requestSelfHeal('online', true);
+            refreshConnectionStatus();
             if (!chartUpdateInterval) {
                 chartUpdateInterval = setInterval(fetchChartData, CHART_UPDATE_INTERVAL);
             }
@@ -943,17 +1780,25 @@
             log('Internet connection lost');
             clearTimeout(offlineTimeout);
             document.getElementById('offlineIndicator').classList.add('show');
-            // Close WebSocket to prevent reconnection attempts while offline
-            if (websocket) {
-                websocket.close();
-            }
+            abortChartFetch();
+            clearHealTimers();
+            closeWebSocket(true);
+            refreshConnectionStatus();
         });
 
         function retryFetch() {
-            document.getElementById('error').style.display = 'none';
-            document.getElementById('loading').style.display = 'block';
-            connectWebSocket();
-            fetchChartData();
+            fetchFailStreak = 0;
+            lastClassified = null;
+            consecutiveWsFails = 0;
+            clearHealTimers();
+            hideErrorBanner();
+            if (document.getElementById('content').style.display === 'none') {
+                document.getElementById('loading').style.display = 'block';
+                document.getElementById('loading').textContent = 'Loading price data...';
+            }
+            reconnectAttempts = 0;
+            requestSelfHeal('retry-button', true);
+            refreshConnectionStatus();
         }
 
         window.addEventListener('orientationchange', function () {
@@ -970,7 +1815,11 @@
         });
 
         window.addEventListener('beforeunload', function () {
-            if (websocket) websocket.close();
+            abortChartFetch();
+            clearHealTimers();
+            closeWebSocket(true);
+            if (healResumeTimer) clearTimeout(healResumeTimer);
+            if (healthTimer) clearInterval(healthTimer);
             if (chart) chart.destroy();
             if (chartUpdateInterval) clearInterval(chartUpdateInterval);
             if (chartRebuildInterval) clearInterval(chartRebuildInterval);
@@ -978,6 +1827,8 @@
             if (hideButtonTimer) clearTimeout(hideButtonTimer);
         });
 
+        bindCanvasHeal(document.getElementById('priceChart'));
+        startHealthSupervisor();
         connectWebSocket();
         fetchChartData();
         chartUpdateInterval = setInterval(fetchChartData, CHART_UPDATE_INTERVAL);
